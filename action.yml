@@ -1,0 +1,43 @@
+name: 'build and push registry'
+inputs:
+  image:
+    required: true
+  target:
+    description: 'docker-cli --target option'
+  workload_identity_provider:
+    required: true
+  service_account:
+    required: true
+runs:
+  steps:
+    - name: Cache Docker layers
+      uses: actions/cache@v2
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+
+    - name: OICD Setup
+      uses: google-github-actions/auth@v1
+      with:
+        workload_identity_provider: ${{ inputs.workload_identity_provider }}
+        service_account: ${{ inputs.service_account }}
+
+    - name: Configure docker for artifact registry
+      run: gcloud auth configure-docker asia-northeast1-docker.pkg.dev
+
+    - name: Build and push
+      uses: docker/build-push-action@v5
+      with:
+        target: runtime
+        push: true
+        tags: ${{ inputs.image }}
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=maxg
+
+    - name: Move cache
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
