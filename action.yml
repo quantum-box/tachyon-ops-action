@@ -4,13 +4,17 @@ inputs:
     required: true
   target:
     description: 'docker-cli --target option'
+    default: ''
   workload_identity_provider:
     required: true
   service_account:
     required: true
   dockerfile:
+    default: ''
   build-args:
+    default: ''
   context:
+    default: ''
 runs:
   using: "composite"
   steps:
