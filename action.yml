@@ -1,5 +1,7 @@
 name: 'build and push registry'
 inputs:
+  key:
+    required: true
   image:
     required: true
   target:
@@ -26,12 +28,10 @@ runs:
       uses: docker/setup-buildx-action@v3
 
     - name: Cache Docker layers
-      uses: actions/cache@v2
+      uses: actions/cache@v4
       with:
         path: /tmp/.buildx-cache
-        key: ${{ runner.os }}-buildx-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-buildx-
+        key: ${{ runner.os }}-buildx-${{ inputs.key }}
 
     - name: OICD Setup
       uses: google-github-actions/auth@v1
