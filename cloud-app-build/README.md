@@ -22,7 +22,7 @@ Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actio
 
 この JSON が `COMPUTE_GITHUB_ACTIONS_BINDINGS`、private S3 bucket 名が `COMPUTE_GITHUB_ACTIONS_BUCKET`。bucket は対象 Lambda と同じ AWS region に置き、API の AWS SDK もその region を使う。API role に `github-builds/*` の GetObject / PutObject、`github-builds/artifacts/*` の DeleteObject と、この専用 bucket の ListBucket（未作成 receipt を 404 と判定するため）を許可し、public access を全て block する。build ticket の保存値は SSE-S3 暗号化される。`github-builds/tickets/` prefix は 1 日で失効する lifecycle を設定する。**`github-builds/artifacts/` prefix の ZIP は Lambda の再デプロイで使うため、ticket と同じ短期削除 rule に含めない。credential を除いた routing / run / result は `github-builds/routing/` に保持し、ticket 失効後も状態復旧に使う。** ticket は機密の build env を含むので、bucket の閲覧権限を利用者に与えない。
 
-4. Cloud App のビルド設定に `runnerBackend: github_actions` を指定する。`installCommand`、`command`、`outputDirectory` を明示する。依存不要の場合も `installCommand: true` のように明示する。`outputDirectory` はビルド root 内のディレクトリ、または `.zip` ファイルを指定する。
+4. Cloud App のビルド設定に `runnerBackend: github_actions` を指定する。`installCommand`、`command`、`outputDirectory` を明示する。依存不要の場合も `installCommand: "true"` のように明示する。`outputDirectory` はビルド root 内のディレクトリ、または `.zip` ファイルを指定する。
 
 ```yaml
 spec:
