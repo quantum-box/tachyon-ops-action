@@ -8,7 +8,8 @@ import { join } from 'node:path'
 import { containerBuildArgs } from './run.mjs'
 
 test('real container cannot read host OIDC environment or Docker socket', { timeout: 180_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'tachyon-isolation-'))
+  // ARC shares RUNNER_TEMP with its Docker daemon, but not the runner's /tmp.
+  const root = await mkdtemp(join(process.env.RUNNER_TEMP || tmpdir(), 'tachyon-isolation-'))
   const command = `
     test ! -S /var/run/docker.sock
     test ! -d /home/runner
