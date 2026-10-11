@@ -21,6 +21,9 @@ export function validateWorkload(workload) {
   if (workload.deployment_target !== 'lambda' || workload.iac || workload.d1 || workload.callback || workload.supplemental_artifacts?.length) {
     throw new Error('Only Lambda ZIP build workloads are supported')
   }
+  if (workload.framework != null && workload.framework !== 'serverless_functions') {
+    throw new Error('Only Node.js serverless function builds are supported')
+  }
   if (!/^[a-f0-9]{40}$/i.test(workload.source?.commit_sha ?? '') || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(workload.source?.repository_url ?? '')) {
     throw new Error('A GitHub repository and exact commit SHA are required')
   }

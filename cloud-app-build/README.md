@@ -1,11 +1,11 @@
 # Tachyon Cloud App build Action
 
-Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actions runner で実行する。初期版は **Lambda ZIP のみ**。ビルド後の Lambda デプロイは Tachyon が行う。
+Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actions runner で実行する。初期版は **Node.js の Lambda ZIP のみ**。ビルド後の Lambda デプロイは Tachyon が行う。
 
 ## 導入
 
 1. 公開 Action `quantum-box/tachyon-ops-action/cloud-app-build` を利用する。`workflow.example.yml` を対象 repo の `.github/workflows/tachyon-build.yml` に配置し、`REPLACE_WITH_COMMIT_SHA` を配布先のレビュー済み commit SHA に置き換える。`tachyon-apps` は private のため、公開 sample の workflow から直接参照しない。
-2. protected workflow の `api-url` を Tachyon API の HTTPS origin に固定する。dispatch input から API URL、コマンド、secret を受け取らない。runner は Linux、Node 20 以上、Docker、Git、Bash、zip が必要。install/build は PID namespace を分離した Docker container 内で実行し、host の OIDC process・home・Docker socket を mount しない。`nodeVersion` は 20 / 22 / 24（未指定は 22）を選べる。
+2. protected workflow の `api-url` を Tachyon API の HTTPS origin に固定する。dispatch input から API URL、コマンド、secret を受け取らない。runner は Linux、Node 20 以上、Docker、Git、Bash、zip が必要。install/build は PID namespace を分離した Docker container 内で実行し、host の OIDC process・home・Docker socket を mount しない。`nodeVersion` は 20 / 22 / 24（未指定は 22）を選べる。framework は `serverless_functions` または未指定に限定する。container には Node.js と npm があり、host に追加した Rust / Python / native build tool は使えない。
 3. operator が API に次の設定を渡す。GitHub App には対象 repository の Contents read / Actions write を与える。repository の作成・設定変更は governance Terraform 経由で行う。
 
 ```json
@@ -27,6 +27,7 @@ Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actio
 ```yaml
 spec:
   deploymentTarget: lambda
+  framework: serverless_functions
   build:
     runnerBackend: github_actions
     command: npm run build
@@ -43,7 +44,7 @@ spec:
 - GHA runner の分数を Tachyon の build-minute 課金に加算しない。GitHub の利用料と通常の Lambda / storage 利用料は別。
 - 成功・失敗は durable receipt と既存 CompleteBuild へ反映する。通知が途絶えた場合は status polling で GHA の失敗・キャンセルを確認する。Tachyon のキャンセルは GHA run の cancel API へ連携する。
 - GHA 画面での rerun は拒否する。再試行は Tachyon から新しい build を作る。dispatch の応答が失われた run は機密 workload を取得できない。
-- Cloudflare、container image、IaC、D1、supplemental artifact は未対応。異なる target へ暗黙変換しない。
+- Rust / Python など Node.js 以外の toolchain、Cloudflare、container image、IaC、D1、supplemental artifact は未対応。異なる target へ暗黙変換しない。
 - Cloud App のログ API は対応する GHA run へのリンクを返す。GHA ログ本文のミラーリングは行わない。callback は API process ごとに 120 requests / minute に制限する。
 
 ## 検証
@@ -53,6 +54,7 @@ spec:
 ```yaml
 spec:
   deploymentTarget: lambda
+  framework: serverless_functions
   build:
     runnerBackend: github_actions
     installCommand: npm ci --include=dev

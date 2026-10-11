@@ -20,7 +20,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      # Install the language/toolchain needed by this app here.
+      # App commands run inside the Action's Node.js container.
+      # Toolchains installed on this runner are not visible there.
       # Pin the Action to the reviewed implementation commit before use.
       - uses: quantum-box/tachyon-ops-action/cloud-app-build@REPLACE_WITH_COMMIT_SHA
         with:
