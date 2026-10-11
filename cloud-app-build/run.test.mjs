@@ -91,7 +91,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null) {
       assert.ok(args.includes('--platform=linux/amd64'))
       assert.ok(args.includes('--security-opt=no-new-privileges'))
       assert.ok(args.includes('--read-only'))
-      assert.ok(args.includes('node:22-bookworm-slim'))
+      assert.ok(args.includes('public.ecr.aws/sam/build-nodejs22.x:latest'))
       assert.equal(args.some(arg => /checkout-secret|request-secret|docker.sock|--pid=host|--privileged/.test(arg)), false)
       if (failBuild) throw new Error('Compiler failed')
       await mkdir(join(options.cwd, 'dist'))
@@ -181,4 +181,16 @@ test('failed build reports failure without uploading or forwarding compiler outp
   const complete = requests.find(r => r.url.endsWith('/complete'))
   assert.equal(JSON.parse(complete.options.body).success, false)
   assert.equal(complete.options.body.includes('Compiler failed'), false)
+})
+
+
+test('ZIP payload corruption is rejected even with valid directory metadata', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tachyon-corrupt-zip-'))
+  const zip = join(root, 'artifact.zip')
+  const bytes = Buffer.from('UEsDBBQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAaW5kZXgubWpzZXhwb3J0IGNvbnN0IGhhbmRsZXIgPSAoKSA9PiB7fVBLAQIUAxQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAAAAAAAAAAACAAQAAAABpbmRleC5tanNQSwUGAAAAAAEAAQA3AAAARgAAAAAA', 'base64')
+  await writeFile(zip, bytes)
+  await validateLambdaZip(zip)
+  bytes[40] ^= 0xff
+  await writeFile(zip, bytes)
+  await assert.rejects(validateLambdaZip(zip))
 })

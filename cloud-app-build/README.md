@@ -74,3 +74,5 @@ node --test .github/actions/cloud-app-build/run.test.mjs
 GHA backend は `linux/amd64` / Lambda `x86_64` に固定し、ARM の deployment override を拒否する。Node version は Build の route snapshot に保存するため、GHA provider 設定を解除した後も再デプロイできる。
 
 アップロードには署名対象の `status=pending` tag を必須とし、未確定の ZIP は S3 lifecycle で 1 日後から削除対象にする。成功 receipt を保存した ZIP だけ `status=complete` へ変更して保持する。キャンセルは GitHub API を呼ぶ前に変更不可の失敗 receipt を保存するため、遅れて届いた完了通知が成果物を保持することはない。GHA build では Tachyon の credit-consumption attempt を作成しない。
+
+Node.js のビルドは Lambda と同じ Amazon Linux ベースの AWS SAM build image（`public.ecr.aws/sam/build-nodejs<major>.x`）を使用する。ZIP は展開サイズの確認に加えて、展開先を書き出さずに全データの解凍・CRC 検査を行う。
