@@ -74,7 +74,7 @@ export function containerBuildArgs(checkout, cwd, workload, command) {
   const version = workload.commands.node_version || '22'
   if (!['20', '22', '24'].includes(version)) throw new Error('Unsupported Node.js build version')
   const vars = buildEnvironment(workload, {})
-  const args = ['run', '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+  const args = ['run', '--rm', '--init', '--platform=linux/amd64', '--cap-drop=ALL', '--security-opt=no-new-privileges',
     '--cpus=2', '--memory=4g', '--memory-swap=4g',
     '--pids-limit=512', '--read-only', '--tmpfs', '/tmp:rw,exec,nosuid,size=1g',
     '--user', `${process.getuid()}:${process.getgid()}`,
@@ -182,7 +182,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     mask(uploadUrl)
     let uploadError
     try {
-      const uploaded = await http(upload, { method: 'PUT', headers: { 'Content-Type': 'application/zip', 'If-None-Match': '*', 'x-amz-server-side-encryption': 'AES256', 'Content-Length': String(size) }, body: createReadStream(zip), duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(10 * 60_000) })
+      const uploaded = await http(upload, { method: 'PUT', headers: { 'Content-Type': 'application/zip', 'If-None-Match': '*', 'x-amz-server-side-encryption': 'AES256', 'x-amz-tagging': 'status=pending', 'Content-Length': String(size) }, body: createReadStream(zip), duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(10 * 60_000) })
       if (!uploaded.ok) throw new Error(`Artifact upload failed (${uploaded.status})`)
     } catch (error) { uploadError = error }
     if (uploadError) {

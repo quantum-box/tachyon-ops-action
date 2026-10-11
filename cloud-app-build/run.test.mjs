@@ -88,6 +88,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null) {
       assert.equal(options.env.AWS_SECRET_ACCESS_KEY, undefined)
       assert.equal(options.env.GIT_CONFIG_VALUE_0, undefined)
       assert.ok(args.includes('--cap-drop=ALL'))
+      assert.ok(args.includes('--platform=linux/amd64'))
       assert.ok(args.includes('--security-opt=no-new-privileges'))
       assert.ok(args.includes('--read-only'))
       assert.ok(args.includes('node:22-bookworm-slim'))
