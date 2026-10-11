@@ -20,6 +20,13 @@ test('API must be a fixed HTTPS origin without credentials or query', () => {
 
 test('rejects unsupported targets, callbacks, IaC, and floating source refs', () => {
   validateWorkload(workload())
+  validateWorkload({ ...workload(), framework: 'serverless_functions' })
+  for (const framework of ['cargo_lambda', 'rust_server', 'docker', 'unknown']) {
+    assert.throws(() => validateWorkload({ ...workload(), framework }))
+  }
+  for (const name of ['FOO-BAR', '1TOKEN', '', 'ENV=INJECTED']) {
+    assert.throws(() => validateWorkload({ ...workload(), env: [{ name, value: 'invalid' }] }))
+  }
   for (const mutation of [{ deployment_target: 'cloudflare_workers' }, { callback: { url: 'https://evil.test' } }, { iac: { operation: 'apply' } }, { d1: {} }, { commands: {} }, { artifact: {} }, { source: { repository_url: 'https://evil.test/app', commit_sha: 'main' } }]) {
     assert.throws(() => validateWorkload({ ...workload(), ...mutation }))
   }
