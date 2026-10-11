@@ -20,7 +20,7 @@ Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actio
 }
 ```
 
-この JSON が `COMPUTE_GITHUB_ACTIONS_BINDINGS`、private S3 bucket 名が `COMPUTE_GITHUB_ACTIONS_BUCKET`。bucket は対象 Lambda と同じ AWS region に置き、API の AWS SDK もその region を使う。API role に `github-builds/*` の GetObject / PutObject、`github-builds/artifacts/*` の DeleteObject と、この専用 bucket の ListBucket（未作成 receipt を 404 と判定するため）を許可し、public access を全て block する。build ticket の保存値は SSE-S3 暗号化される。`github-builds/tickets/` prefix は 1 日で失効する lifecycle を設定する。**`github-builds/artifacts/` prefix の ZIP は Lambda の再デプロイで使うため、ticket と同じ短期削除 rule に含めない。credential を除いた routing / run / result は `github-builds/routing/` に保持し、ticket 失効後も状態復旧に使う。** ticket は機密の build env を含むので、bucket の閲覧権限を利用者に与えない。
+この JSON が `COMPUTE_GITHUB_ACTIONS_BINDINGS`、private S3 bucket 名が `COMPUTE_GITHUB_ACTIONS_BUCKET`。bucket は対象 Lambda と同じ AWS region に置き、API の AWS SDK もその region を使う。API role に `github-builds/*` の GetObject / PutObject、`github-builds/artifacts/*` の DeleteObject / PutObjectTagging と、この専用 bucket の ListBucket（未作成 receipt を 404 と判定するため）を許可し、public access を全て block する。build ticket の保存値は SSE-S3 暗号化される。`github-builds/tickets/` prefix は 1 日で失効する lifecycle を設定する。**`github-builds/artifacts/` prefix の ZIP は Lambda の再デプロイで使うため、ticket と同じ短期削除 rule に含めない。credential を除いた routing / run / result は `github-builds/routing/` に保持し、ticket 失効後も状態復旧に使う。** ticket は機密の build env を含むので、bucket の閲覧権限を利用者に与えない。
 
 4. Cloud App のビルド設定に `runnerBackend: github_actions` を指定する。`installCommand`、`command`、`outputDirectory` を明示する。依存不要の場合も `installCommand: "true"` のように明示する。`outputDirectory` はビルド root 内のディレクトリ、または `.zip` ファイルを指定する。
 
@@ -70,3 +70,7 @@ node --test .github/actions/cloud-app-build/run.test.mjs
 ```
 
 実環境では、1 app で開始・成功・Lambda deploy を確認した後、キャンセルと別 run / rerun の OIDC 拒否を確認する。既定 runner は Kata のまま。戻す場合は app の runner を変更し、進行中 GHA build が終了するまで API の GHA 設定を維持する。
+
+GHA backend は `linux/amd64` / Lambda `x86_64` に固定し、ARM の deployment override を拒否する。Node version は Build の route snapshot に保存するため、GHA provider 設定を解除した後も再デプロイできる。
+
+アップロードには署名対象の `status=pending` tag を必須とし、未確定の ZIP は S3 lifecycle で 1 日後から削除対象にする。成功 receipt を保存した ZIP だけ `status=complete` へ変更して保持する。キャンセルは GitHub API を呼ぶ前に変更不可の失敗 receipt を保存するため、遅れて届いた完了通知が成果物を保持することはない。GHA build では Tachyon の credit-consumption attempt を作成しない。
