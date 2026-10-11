@@ -1,0 +1,28 @@
+name: Tachyon Cloud App build
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: Tachyon build ID
+        type: string
+        required: true
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: tachyon-build-${{ inputs.build_id }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Install the language/toolchain needed by this app here.
+      # Pin the Action to the reviewed implementation commit before use.
+      - uses: quantum-box/tachyon-ops-action/cloud-app-build@REPLACE_WITH_COMMIT_SHA
+        with:
+          api-url: https://api.n1.tachy.one
+          build-id: ${{ inputs.build_id }}
