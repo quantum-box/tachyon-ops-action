@@ -4,7 +4,7 @@ Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actio
 
 ## 導入
 
-1. このディレクトリの `action.yml` と `run.mjs` を公開 repo `quantum-box/tachyon-ops-action` の `cloud-app-build/` に配布する（現時点では未配布）。`workflow.example.yml` を対象 repo の `.github/workflows/tachyon-build.yml` に配置し、`REPLACE_WITH_COMMIT_SHA` を配布先のレビュー済み commit SHA に置き換える。`tachyon-apps` は private のため、公開 sample の workflow から直接参照しない。
+1. 公開 Action `quantum-box/tachyon-ops-action/cloud-app-build` を利用する。`workflow.example.yml` を対象 repo の `.github/workflows/tachyon-build.yml` に配置し、`REPLACE_WITH_COMMIT_SHA` を配布先のレビュー済み commit SHA に置き換える。`tachyon-apps` は private のため、公開 sample の workflow から直接参照しない。
 2. protected workflow の `api-url` を Tachyon API の HTTPS origin に固定する。dispatch input から API URL、コマンド、secret を受け取らない。必要な言語・toolchain・Node version は workflow で事前セットアップする。runner は Linux、Node 20 以上、Git、Bash、zip が必要。
 3. operator が API に次の設定を渡す。GitHub App には対象 repository の Contents read / Actions write を与える。repository の作成・設定変更は governance Terraform 経由で行う。
 
@@ -63,7 +63,7 @@ spec:
 allowlist の `repository` は `quantum-box/tachyon-api-server-template`、`repository_id` は `1188397578`、`workflow` は `tachyon-build.yml`、`workflow_ref` は `refs/heads/main`。この sample は `tachyon.yaml` を持たないため、初回は app の build settings / API から同じ値を指定すると build-time IaC を有効にせず試せる。Lambda runtime は Node.js 22.x、handler は `index.handler` を設定する。
 
 ```sh
-node --test .github/actions/cloud-app-build/run.test.mjs
+node --test cloud-app-build/run.test.mjs
 ```
 
 実環境では、1 app で開始・成功・Lambda deploy を確認した後、キャンセルと別 run / rerun の OIDC 拒否を確認する。既定 runner は Kata のまま。戻す場合は app の runner を変更し、進行中 GHA build が終了するまで API の GHA 設定を維持する。
