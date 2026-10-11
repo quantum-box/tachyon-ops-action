@@ -118,7 +118,9 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     return value
   }
   async function request(path, options = {}) {
-    return http(`${base}/${path}`, { ...options, headers: { ...options.headers, Authorization: `Bearer ${await oidc()}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) })
+    // Completion also waits for Lambda deployment and its serving probe.
+    const timeoutMs = path === 'complete' ? 120_000 : 30_000
+    return http(`${base}/${path}`, { ...options, headers: { ...options.headers, Authorization: `Bearer ${await oidc()}` }, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) })
   }
   async function requestWithRetry(path, options = {}, starting = false) {
     for (let attempt = 0; attempt < 12; attempt++) {

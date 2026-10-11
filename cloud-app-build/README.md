@@ -43,6 +43,7 @@ spec:
 - `id-token: write` と `contents: read` が必要。OIDC audience は `tachyon-api/cloud-app-build`。repo ID / workflow ref / run ID / event / attempt を検証する。Tachyon の長期 API key は不要。
 - ZIP は署名付き URL への create-only PUT。別 build の成果物や、後から上書きした ZIP を採用しない。最大 512 MiB、展開後は [Lambda の上限](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html) に従い 250 MiB。upload 直前に URL を再取得し、S3 側では受信バイト数を HEAD で確認する。サイズ超過は削除して完了を拒否する。PUT 応答を失った場合は認証済み API で同じ object のサイズを確認し、保存済みなら成功として継続する。失敗・キャンセル・timeout の不要な成果物は削除する。
 - GHA runner の分数を Tachyon の build-minute 課金に加算しない。GitHub の利用料と通常の Lambda / storage 利用料は別。
+- 完了callbackはLambda deploymentとserving確認を待つため1 requestの制限を120秒にする。OIDC/workload requestは30秒のまま。いずれも最大12回の再試行に限定する。
 - 成功・失敗は durable receipt と既存 CompleteBuild へ反映する。通知が途絶えた場合は status polling で GHA の失敗・キャンセルを確認する。Tachyon のキャンセルは GHA run の cancel API へ連携する。
 - GHA 画面での rerun は拒否する。再試行は Tachyon から新しい build を作る。dispatch の応答が失われた run は機密 workload を取得できない。
 - Rust / Python など Node.js 以外の toolchain、Cloudflare、container image、IaC、D1、supplemental artifact、secret reference は未対応。異なる target へ暗黙変換しない。
