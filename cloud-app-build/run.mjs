@@ -65,6 +65,7 @@ export function containerBuildArgs(checkout, cwd, workload, command) {
   if (!['20', '22', '24'].includes(version)) throw new Error('Unsupported Node.js build version')
   const vars = buildEnvironment(workload, {})
   const args = ['run', '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+    '--cpus=2', '--memory=4g', '--memory-swap=4g',
     '--pids-limit=512', '--read-only', '--tmpfs', '/tmp:rw,exec,nosuid,size=1g',
     '--user', `${process.getuid()}:${process.getgid()}`,
     '--mount', `type=bind,source=${checkout},target=/workspace`,
@@ -83,6 +84,9 @@ function execute(command, args, options) {
 }
 
 export async function run(env = process.env, http = fetch, runtime = {}) {
+  // A single-job ephemeral VM bounds workspace lifetime and disk ownership.
+  // Persistent self-hosted workspaces need quota support before being enabled.
+  if (env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('GitHub-hosted Linux runners are required')
   const exec = runtime.execute ?? execute
   const wait = runtime.sleep ?? sleep
   const origin = apiOrigin(env.TACHYON_BUILD_API_URL)
@@ -165,8 +169,17 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     const upload = new URL(uploadUrl)
     if (upload.protocol !== 'https:' || upload.username || upload.password) throw new Error('Invalid artifact upload URL')
     mask(uploadUrl)
-    const uploaded = await http(upload, { method: 'PUT', headers: { 'Content-Type': 'application/zip', 'If-None-Match': '*', 'x-amz-server-side-encryption': 'AES256', 'Content-Length': String(size) }, body: createReadStream(zip), duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(10 * 60_000) })
-    if (!uploaded.ok) throw new Error(`Artifact upload failed (${uploaded.status})`)
+    let uploadError
+    try {
+      const uploaded = await http(upload, { method: 'PUT', headers: { 'Content-Type': 'application/zip', 'If-None-Match': '*', 'x-amz-server-side-encryption': 'AES256', 'Content-Length': String(size) }, body: createReadStream(zip), duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(10 * 60_000) })
+      if (!uploaded.ok) throw new Error(`Artifact upload failed (${uploaded.status})`)
+    } catch (error) { uploadError = error }
+    if (uploadError) {
+      // A lost response does not imply a failed create-only PUT. Verify the
+      // fixed object through authenticated HEAD before recording failure.
+      const verified = await requestWithRetry('workload')
+      if (!verified.ok || (await verified.json()).uploaded_artifact_size !== size) throw uploadError
+    }
     success = true
   } catch (error) { buildError = error }
   finally {

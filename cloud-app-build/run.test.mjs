@@ -52,7 +52,7 @@ test('checkout paths reject traversal, absolute paths, and symlink escapes', asy
   await assert.rejects(containedPath(checkout, 'outside'))
 })
 
-async function simulatedRun(failBuild, faults = []) {
+async function simulatedRun(failBuild, faults = [], uploadFault = null) {
   const requests = []
   const commands = []
   const waits = []
@@ -61,7 +61,9 @@ async function simulatedRun(failBuild, faults = []) {
     TACHYON_BUILD_GITHUB_TOKEN: 'checkout-secret', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://oidc.example.com/token',
     ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'request-secret', PATH: '/usr/bin:/bin', HOME: tmpdir(),
     AWS_SECRET_ACCESS_KEY: 'must-not-reach-build',
+    RUNNER_ENVIRONMENT: 'github-hosted',
   }
+  let uploadedSize = null
   const http = async (url, options) => {
     requests.push({ url: String(url), options })
     if (String(url).startsWith('https://oidc.example.com/')) return Response.json({ value: 'signed-oidc' })
@@ -69,9 +71,11 @@ async function simulatedRun(failBuild, faults = []) {
       const fault = faults.shift()
       if (fault.status) return new Response(null, { status: fault.status, headers: { 'Retry-After': '3' } })
     }
-    if (String(url).endsWith('/workload')) return Response.json({ workload: workload(), upload_url: 'https://s3.example.com/artifact.zip?signature=secret' })
+    if (String(url).endsWith('/workload')) return Response.json({ workload: workload(), upload_url: 'https://s3.example.com/artifact.zip?signature=secret', uploaded_artifact_size: uploadedSize })
     if (options.method === 'PUT') {
       for await (const chunk of options.body) assert.ok(chunk.length > 0)
+      if (uploadFault !== 'missing') uploadedSize = Number(options.headers['Content-Length'])
+      if (uploadFault) throw new Error('Lost upload response')
     }
     return new Response(null, { status: 204 })
   }
@@ -137,7 +141,25 @@ test('container accepts only supported Node images and mounts the checkout alone
   const args = containerBuildArgs('/source', '/source/app', workload(), 'npm run build')
   assert.ok(args.includes('type=bind,source=/source,target=/workspace'))
   assert.ok(args.includes('/workspace/app'))
+  assert.ok(args.includes('--cpus=2'))
+  assert.ok(args.includes('--memory=4g'))
+  assert.ok(args.includes('--memory-swap=4g'))
   assert.throws(() => containerBuildArgs('/source', '/source', { ...workload(), commands: { node_version: 'evil/image' } }, 'true'))
+})
+
+test('ambiguous uploads recover only when authenticated object size matches', async () => {
+  for (const fault of ['committed', 'missing']) {
+    const { requests, error } = await simulatedRun(false, [], fault)
+    const completion = JSON.parse(requests.find(r => r.url.endsWith('/complete')).options.body)
+    assert.equal(completion.success, fault === 'committed')
+    assert.equal(requests.filter(r => r.options.method === 'PUT').length, 1)
+    if (fault === 'committed') assert.ifError(error)
+    else assert.match(error.message, /Lost upload response/)
+  }
+})
+
+test('persistent self-hosted runners are rejected before credentials are requested', async () => {
+  await assert.rejects(run({ RUNNER_ENVIRONMENT: 'self-hosted' }, () => assert.fail('HTTP must not run')), /GitHub-hosted/)
 })
 
 test('failed build reports failure without uploading or forwarding compiler output', async () => {
