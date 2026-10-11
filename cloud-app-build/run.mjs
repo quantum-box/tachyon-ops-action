@@ -12,11 +12,14 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 export async function validateLambdaZip(path, inspect = promisify(execFile)) {
   // Read central-directory totals without extracting untrusted archive data.
-  const { stdout } = await inspect('unzip', ['-Z', '-t', path], {
+  const options = {
     env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' }, timeout: 30_000, maxBuffer: 32 * 1024,
-  })
+  }
+  const { stdout } = await inspect('unzip', ['-Z', '-t', path], options)
   const summary = stdout.match(/^\d+ files?, (\d+) bytes uncompressed,/m)
   if (!summary || BigInt(summary[1]) > 250n * 1024n * 1024n) throw new Error('Lambda ZIP exceeds the 250 MiB uncompressed limit or is invalid')
+  // Check decompression and CRC without writing repository-controlled paths.
+  await inspect('unzip', ['-tqq', path], options)
 }
 
 export function apiOrigin(value) {
@@ -81,7 +84,7 @@ export function containerBuildArgs(checkout, cwd, workload, command) {
     '--mount', `type=bind,source=${checkout},target=/workspace`,
     '--workdir', `/workspace/${relative(checkout, cwd)}`, '--env', 'HOME=/tmp', '--env', 'CI=true']
   for (const [name, value] of Object.entries(vars)) args.push('--env', `${name}=${value}`)
-  args.push(`node:${version}-bookworm-slim`, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
+  args.push('--entrypoint', '/bin/bash', `public.ecr.aws/sam/build-nodejs${version}.x:latest`, '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
   return args
 }
 
