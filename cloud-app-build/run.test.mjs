@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, symlink, realpath, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, validateWorkload, run } from './run.mjs'
+import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, validateLambdaZip, validateWorkload, run } from './run.mjs'
 
 const workload = () => ({
   deployment_target: 'lambda', source: { repository_url: 'https://github.com/acme/app', commit_sha: 'a'.repeat(40) },
@@ -62,6 +62,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null) {
     ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'request-secret', PATH: '/usr/bin:/bin', HOME: tmpdir(),
     AWS_SECRET_ACCESS_KEY: 'must-not-reach-build',
     RUNNER_ENVIRONMENT: 'github-hosted',
+    RUNNER_OS: 'Linux',
   }
   let uploadedSize = null
   const http = async (url, options) => {
@@ -96,7 +97,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null) {
     }
     if (command === 'zip') {
       assert.equal(options.env.APP_VALUE, undefined)
-      await writeFile(args[3], 'PKzip-for-test')
+      await writeFile(args[3], Buffer.from('UEsDBBQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAaW5kZXgubWpzZXhwb3J0IGNvbnN0IGhhbmRsZXIgPSAoKSA9PiB7fVBLAQIUAxQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAAAAAAAAAAACAAQAAAABpbmRleC5tanNQSwUGAAAAAAEAAQA3AAAARgAAAAAA', 'base64'))
     }
   }
   let error
@@ -158,8 +159,18 @@ test('ambiguous uploads recover only when authenticated object size matches', as
   }
 })
 
+test('ZIP metadata rejects malformed output and oversized uncompressed payloads', async () => {
+  await validateLambdaZip('fixture', async () => ({ stdout: '2 files, 262144000 bytes uncompressed, 12 bytes compressed: 99.9%' }))
+  for (const stdout of ['invalid archive', '2 files, 262144001 bytes uncompressed, 12 bytes compressed: 99.9%']) {
+    await assert.rejects(validateLambdaZip('fixture', async () => ({ stdout })), /250 MiB/)
+  }
+})
+
 test('persistent self-hosted runners are rejected before credentials are requested', async () => {
   await assert.rejects(run({ RUNNER_ENVIRONMENT: 'self-hosted' }, () => assert.fail('HTTP must not run')), /GitHub-hosted/)
+  for (const RUNNER_OS of ['Windows', 'macOS']) {
+    await assert.rejects(run({ RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS }, () => assert.fail('HTTP must not run')), /GitHub-hosted/)
+  }
 })
 
 test('failed build reports failure without uploading or forwarding compiler output', async () => {

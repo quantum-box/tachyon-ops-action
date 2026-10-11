@@ -5,7 +5,7 @@ Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actio
 ## 導入
 
 1. 公開 Action `quantum-box/tachyon-ops-action/cloud-app-build` を利用する。`workflow.example.yml` を対象 repo の `.github/workflows/tachyon-build.yml` に配置し、`REPLACE_WITH_COMMIT_SHA` を配布先のレビュー済み commit SHA に置き換える。`tachyon-apps` は private のため、公開 sample の workflow から直接参照しない。
-2. protected workflow の `api-url` を Tachyon API の HTTPS origin に固定する。dispatch input から API URL、コマンド、secret を受け取らない。runner は GitHub-hosted Linux（例: `ubuntu-latest`）に限定し、Node 20 以上、Docker、Git、Bash、zip が必要。永続 self-hosted runner は workspace の容量 quota を保証できないため初期版では拒否する。container の CPU は 2、memory / swap 合計は 4 GiB に制限し、workspace は job ごとの一時 VM と終了時 cleanup に限定する。install/build は PID namespace を分離した Docker container 内で実行し、host の OIDC process・home・Docker socket を mount しない。`nodeVersion` は 20 / 22 / 24（未指定は 22）を選べる。framework は `serverless_functions` または未指定に限定する。container には Node.js と npm があり、host に追加した Rust / Python / native build tool は使えない。
+2. protected workflow の `api-url` を Tachyon API の HTTPS origin に固定する。dispatch input から API URL、コマンド、secret を受け取らない。runner は GitHub-hosted Linux（例: `ubuntu-latest`）に限定し、Node 20 以上、Docker、Git、Bash、zip / unzip が必要。永続 self-hosted runner は workspace の容量 quota を保証できないため初期版では拒否する。container の CPU は 2、memory / swap 合計は 4 GiB に制限し、workspace は job ごとの一時 VM と終了時 cleanup に限定する。install/build は PID namespace を分離した Docker container 内で実行し、host の OIDC process・home・Docker socket を mount しない。`nodeVersion` は 20 / 22 / 24（未指定は 22）を選べる。framework は `serverless_functions` または未指定に限定する。container には Node.js と npm があり、host に追加した Rust / Python / native build tool は使えない。
 3. operator が API に次の設定を渡す。GitHub App には対象 repository の Contents read / Actions write を与える。repository の作成・設定変更は governance Terraform 経由で行う。
 
 ```json
@@ -41,7 +41,7 @@ spec:
 
 - `workflow_dispatch` input は Tachyon の `build_id` のみ。ソース SHA と build command は OIDC 認証後に取得する。checkout は branch 名ではなく確定 SHA を使用する。
 - `id-token: write` と `contents: read` が必要。OIDC audience は `tachyon-api/cloud-app-build`。repo ID / workflow ref / run ID / event / attempt を検証する。Tachyon の長期 API key は不要。
-- ZIP は署名付き URL への create-only PUT。別 build の成果物や、後から上書きした ZIP を採用しない。最大 512 MiB。upload 直前に URL を再取得し、S3 側では受信バイト数を HEAD で確認する。サイズ超過は削除して完了を拒否する。PUT 応答を失った場合は認証済み API で同じ object のサイズを確認し、保存済みなら成功として継続する。失敗・キャンセル・timeout の不要な成果物は削除する。
+- ZIP は署名付き URL への create-only PUT。別 build の成果物や、後から上書きした ZIP を採用しない。最大 512 MiB、展開後は [Lambda の上限](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html) に従い 250 MiB。upload 直前に URL を再取得し、S3 側では受信バイト数を HEAD で確認する。サイズ超過は削除して完了を拒否する。PUT 応答を失った場合は認証済み API で同じ object のサイズを確認し、保存済みなら成功として継続する。失敗・キャンセル・timeout の不要な成果物は削除する。
 - GHA runner の分数を Tachyon の build-minute 課金に加算しない。GitHub の利用料と通常の Lambda / storage 利用料は別。
 - 成功・失敗は durable receipt と既存 CompleteBuild へ反映する。通知が途絶えた場合は status polling で GHA の失敗・キャンセルを確認する。Tachyon のキャンセルは GHA run の cancel API へ連携する。
 - GHA 画面での rerun は拒否する。再試行は Tachyon から新しい build を作る。dispatch の応答が失われた run は機密 workload を取得できない。
@@ -63,7 +63,7 @@ spec:
     outputDirectory: lambda.zip
 ```
 
-allowlist の `repository` は `quantum-box/tachyon-api-server-template`、`repository_id` は `1188397578`、`workflow` は `tachyon-build.yml`、`workflow_ref` は `refs/heads/main`。この sample は `tachyon.yaml` を持たないため、初回は app の build settings / API から同じ値を指定すると build-time IaC を有効にせず試せる。sample の build workflow は Node.js 22 を使用する。Lambda の runtime は Tachyon の deploy 設定に従い、handler は `index.handler`。sample は `NODE_ENV=production` を app の環境変数に設定し、開発用 HTTP server の起動を止める。`npm ci --include=dev` により production 環境でも build 用依存をインストールする。
+allowlist の `repository` は `quantum-box/tachyon-api-server-template`、`repository_id` は `1188397578`、`workflow` は `tachyon-build.yml`、`workflow_ref` は `refs/heads/main`。この sample は `tachyon.yaml` を持たないため、初回は app の build settings / API から同じ値を指定すると build-time IaC を有効にせず試せる。sample の build workflow は Node.js 22 を使用する。Lambda の runtime は受け付けた build の Node version に固定し、handler は `index.handler`。sample は `NODE_ENV=production` を app の環境変数に設定し、開発用 HTTP server の起動を止める。`npm ci --include=dev` により production 環境でも build 用依存をインストールする。
 
 ```sh
 node --test .github/actions/cloud-app-build/run.test.mjs

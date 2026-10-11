@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { promisify } from 'node:util'
 import { createReadStream } from 'node:fs'
 import { mkdtemp, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,6 +9,15 @@ import { pathToFileURL } from 'node:url'
 const audience = 'tachyon-api/cloud-app-build'
 const mask = value => console.log(`::add-mask::${String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`)
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+export async function validateLambdaZip(path, inspect = promisify(execFile)) {
+  // Read central-directory totals without extracting untrusted archive data.
+  const { stdout } = await inspect('unzip', ['-Z', '-t', path], {
+    env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' }, timeout: 30_000, maxBuffer: 32 * 1024,
+  })
+  const summary = stdout.match(/^\d+ files?, (\d+) bytes uncompressed,/m)
+  if (!summary || BigInt(summary[1]) > 250n * 1024n * 1024n) throw new Error('Lambda ZIP exceeds the 250 MiB uncompressed limit or is invalid')
+}
 
 export function apiOrigin(value) {
   const url = new URL(value)
@@ -86,7 +96,7 @@ function execute(command, args, options) {
 export async function run(env = process.env, http = fetch, runtime = {}) {
   // A single-job ephemeral VM bounds workspace lifetime and disk ownership.
   // Persistent self-hosted workspaces need quota support before being enabled.
-  if (env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('GitHub-hosted Linux runners are required')
+  if (env.RUNNER_ENVIRONMENT !== 'github-hosted' || env.RUNNER_OS !== 'Linux') throw new Error('GitHub-hosted Linux runners are required')
   const exec = runtime.execute ?? execute
   const wait = runtime.sleep ?? sleep
   const origin = apiOrigin(env.TACHYON_BUILD_API_URL)
@@ -161,6 +171,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     } else if (!output.endsWith('.zip')) throw new Error('Artifact must be a directory or ZIP file')
     const size = (await stat(zip)).size
     if (size === 0 || size > 512 * 1024 * 1024) throw new Error('Invalid ZIP artifact size')
+    await validateLambdaZip(zip)
     // Session credentials may expire while a long build runs; obtain a fresh
     // presigned URL only when the artifact is ready to upload.
     const refreshed = await requestWithRetry('workload')
