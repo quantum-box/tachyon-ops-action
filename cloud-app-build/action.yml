@@ -1,0 +1,19 @@
+name: Tachyon Cloud App build
+description: Build a dispatched Lambda ZIP and return it to Tachyon using GitHub OIDC
+inputs:
+  api-url:
+    description: Trusted Tachyon API origin; set in the protected workflow, not dispatch inputs
+    required: true
+  build-id:
+    description: Build ID supplied by Tachyon workflow_dispatch
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Build and report to Tachyon
+      shell: bash
+      env:
+        TACHYON_BUILD_API_URL: ${{ inputs.api-url }}
+        TACHYON_BUILD_ID: ${{ inputs.build-id }}
+        TACHYON_BUILD_GITHUB_TOKEN: ${{ github.token }}
+      run: node "$GITHUB_ACTION_PATH/run.mjs"

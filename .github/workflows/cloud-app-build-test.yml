@@ -1,0 +1,19 @@
+name: Cloud App build Action test
+on:
+  pull_request:
+    paths: ['cloud-app-build/**', '.github/workflows/cloud-app-build-test.yml']
+  push:
+    branches: [main, master]
+    paths: ['cloud-app-build/**', '.github/workflows/cloud-app-build-test.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test cloud-app-build/run.test.mjs
