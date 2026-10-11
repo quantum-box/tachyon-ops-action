@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
-import { mkdtemp, realpath, stat } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -128,8 +128,9 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
   const started = Date.now()
   let success = false
   let buildError
+  let workspace
   try {
-    const workspace = await mkdtemp(join(env.RUNNER_TEMP || tmpdir(), 'tachyon-build-'))
+    workspace = await mkdtemp(join(env.RUNNER_TEMP || tmpdir(), 'tachyon-build-'))
     const checkout = join(workspace, 'source')
     const token = env.TACHYON_BUILD_GITHUB_TOKEN
     if (!token) throw new Error('GitHub read token is required for checkout')
@@ -168,6 +169,12 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     if (!uploaded.ok) throw new Error(`Artifact upload failed (${uploaded.status})`)
     success = true
   } catch (error) { buildError = error }
+  finally {
+    if (workspace) {
+      try { await rm(workspace, { recursive: true, force: true, maxRetries: 3 }) }
+      catch (error) { buildError ??= error; success = false }
+    }
+  }
   // Refresh OIDC for long builds. Reuse an identical result on retries.
   const body = JSON.stringify({ success, duration_secs: Math.ceil((Date.now() - started) / 1000) })
   const completed = await requestWithRetry('complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })

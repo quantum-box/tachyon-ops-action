@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, symlink, realpath, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, symlink, realpath, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, validateWorkload, run } from './run.mjs'
 
 const workload = () => ({
@@ -97,6 +97,8 @@ async function simulatedRun(failBuild, faults = []) {
   }
   let error
   try { await run(env, http, { execute, sleep: async ms => { waits.push(ms) } }) } catch (caught) { error = caught }
+  const checkout = commands.find(c => c.command === 'git' && c.args[0] === 'init')?.args[1]
+  if (checkout) await assert.rejects(stat(dirname(checkout)), { code: 'ENOENT' })
   return { requests, commands, error, waits }
 }
 
