@@ -128,8 +128,9 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
         await wait(2500)
         continue
       }
-      // A runner may start before its dispatch receipt and Build CAS are saved.
-      const retry = response.status === 429 || response.status >= 500 || (starting && [403, 409].includes(response.status))
+      // Rolling API deployments can route callbacks to old tasks with no route.
+      // A runner can also start before its dispatch receipt and Build CAS are saved.
+      const retry = response.status === 404 || response.status === 429 || response.status >= 500 || (starting && [403, 409].includes(response.status))
       if (response.ok || !retry || attempt === 11) return response
       const header = response.headers.get('Retry-After')
       const seconds = header && /^\d+$/.test(header) ? Number(header) : NaN

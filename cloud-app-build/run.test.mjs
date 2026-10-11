@@ -110,17 +110,17 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null) {
 
 test('429 and transient storage failures retry initial, upload and completion authorization', async () => {
   const faults = [
-    { path: 'workload', status: 429 }, { path: 'workload' },
+    { path: 'workload', status: 404 }, { path: 'workload', status: 429 }, { path: 'workload' },
     { path: 'workload', status: 503 },
-    { path: 'complete', status: 429 }, { path: 'complete', status: 503 },
+    { path: 'complete', status: 404 }, { path: 'complete', status: 429 }, { path: 'complete', status: 503 },
   ]
   const { requests, commands, error, waits } = await simulatedRun(false, faults)
   assert.ifError(error)
-  assert.deepEqual(waits, [3000, 3000, 3000, 3000])
+  assert.deepEqual(waits, [3000, 3000, 3000, 3000, 3000, 3000])
   assert.equal(commands.filter(c => c.command === 'docker').length, 1)
   assert.equal(requests.filter(r => r.options.method === 'PUT').length, 1)
   const completions = requests.filter(r => r.url.endsWith('/complete'))
-  assert.equal(completions.length, 3)
+  assert.equal(completions.length, 4)
   assert.equal(new Set(completions.map(r => r.options.body)).size, 1)
 })
 
