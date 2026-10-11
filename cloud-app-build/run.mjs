@@ -57,6 +57,20 @@ export function buildEnvironment(workload, env) {
   return result
 }
 
+export function containerBuildArgs(checkout, cwd, workload, command) {
+  const version = workload.commands.node_version || '22'
+  if (!['20', '22', '24'].includes(version)) throw new Error('Unsupported Node.js build version')
+  const vars = buildEnvironment(workload, {})
+  const args = ['run', '--rm', '--init', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+    '--pids-limit=512', '--read-only', '--tmpfs', '/tmp:rw,exec,nosuid,size=1g',
+    '--user', `${process.getuid()}:${process.getgid()}`,
+    '--mount', `type=bind,source=${checkout},target=/workspace`,
+    '--workdir', `/workspace/${relative(checkout, cwd)}`, '--env', 'HOME=/tmp', '--env', 'CI=true']
+  for (const [name, value] of Object.entries(vars)) args.push('--env', `${name}=${value}`)
+  args.push(`node:${version}-bookworm-slim`, 'bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
+  return args
+}
+
 function execute(command, args, options) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { ...options, stdio: 'inherit' })
@@ -94,11 +108,8 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     await wait(2500)
   }
   if (!response.ok) throw new Error(`Workload request failed (${response.status})`)
-  const { workload, upload_url: uploadUrl } = await response.json()
+  const { workload } = await response.json()
   validateWorkload(workload)
-  const upload = new URL(uploadUrl)
-  if (upload.protocol !== 'https:' || upload.username || upload.password) throw new Error('Invalid artifact upload URL')
-  mask(uploadUrl)
   for (const item of workload.env ?? []) if (item.value) mask(item.value)
   const started = Date.now()
   let success = false
@@ -119,8 +130,11 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     await exec('git', ['fetch', '--depth=1', 'origin', workload.source.commit_sha], { cwd: checkout, env: gitEnv })
     await exec('git', ['checkout', '--detach', workload.source.commit_sha], { cwd: checkout, env: gitEnv })
     const cwd = await containedPath(checkout, workload.workspace?.root_directory || '.')
-    if (workload.commands.install) await exec('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', workload.commands.install], { cwd, env: childEnv })
-    await exec('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', workload.commands.build], { cwd, env: childEnv })
+    // Repository code runs in a separate PID namespace, with no host process,
+    // runner-home or Docker-socket mount and no OIDC/GitHub credentials.
+    for (const command of [workload.commands.install, workload.commands.build].filter(Boolean)) {
+      await exec('docker', containerBuildArgs(checkout, cwd, workload, command), { cwd, env: checkoutEnv })
+    }
     const output = await containedPath(cwd, workload.artifact.output_directory)
     let zip = output
     if ((await stat(output)).isDirectory()) {
@@ -129,6 +143,14 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     } else if (!output.endsWith('.zip')) throw new Error('Artifact must be a directory or ZIP file')
     const size = (await stat(zip)).size
     if (size === 0 || size > 512 * 1024 * 1024) throw new Error('Invalid ZIP artifact size')
+    // Session credentials may expire while a long build runs; obtain a fresh
+    // presigned URL only when the artifact is ready to upload.
+    const refreshed = await request('workload')
+    if (!refreshed.ok) throw new Error(`Upload authorization failed (${refreshed.status})`)
+    const { upload_url: uploadUrl } = await refreshed.json()
+    const upload = new URL(uploadUrl)
+    if (upload.protocol !== 'https:' || upload.username || upload.password) throw new Error('Invalid artifact upload URL')
+    mask(uploadUrl)
     const uploaded = await http(upload, { method: 'PUT', headers: { 'Content-Type': 'application/zip', 'If-None-Match': '*', 'x-amz-server-side-encryption': 'AES256', 'Content-Length': String(size) }, body: createReadStream(zip), duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(10 * 60_000) })
     if (!uploaded.ok) throw new Error(`Artifact upload failed (${uploaded.status})`)
     success = true

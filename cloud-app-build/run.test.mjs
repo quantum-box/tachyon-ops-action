@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, symlink, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apiOrigin, buildEnvironment, containedPath, validateWorkload, run } from './run.mjs'
+import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, validateWorkload, run } from './run.mjs'
 
 const workload = () => ({
   deployment_target: 'lambda', source: { repository_url: 'https://github.com/acme/app', commit_sha: 'a'.repeat(40) },
@@ -66,10 +66,15 @@ async function simulatedRun(failBuild) {
   const execute = async (command, args, options) => {
     commands.push({ command, args, options })
     if (command === 'git' && args[0] === 'init') await mkdir(args[1])
-    if (command === 'bash') {
+    if (command === 'docker') {
       assert.equal(options.env.TACHYON_BUILD_GITHUB_TOKEN, undefined)
       assert.equal(options.env.AWS_SECRET_ACCESS_KEY, undefined)
       assert.equal(options.env.GIT_CONFIG_VALUE_0, undefined)
+      assert.ok(args.includes('--cap-drop=ALL'))
+      assert.ok(args.includes('--security-opt=no-new-privileges'))
+      assert.ok(args.includes('--read-only'))
+      assert.ok(args.includes('node:22-bookworm-slim'))
+      assert.equal(args.some(arg => /checkout-secret|request-secret|docker.sock|--pid=host|--privileged/.test(arg)), false)
       if (failBuild) throw new Error('Compiler failed')
       await mkdir(join(options.cwd, 'dist'))
     }
@@ -91,7 +96,15 @@ test('dispatch contract checks out exact SHA, uploads once, and reports success 
   const complete = requests.find(r => r.url.endsWith('/complete'))
   assert.equal(JSON.parse(complete.options.body).success, true)
   assert.equal(complete.options.headers.Authorization, 'Bearer signed-oidc')
-  assert.equal(requests.filter(r => r.url.startsWith('https://oidc.example.com/')).length, 2)
+  assert.equal(requests.filter(r => r.url.startsWith('https://oidc.example.com/')).length, 3)
+  assert.equal(requests.filter(r => r.url.endsWith('/workload')).length, 2)
+})
+
+test('container accepts only supported Node images and mounts the checkout alone', () => {
+  const args = containerBuildArgs('/source', '/source/app', workload(), 'npm run build')
+  assert.ok(args.includes('type=bind,source=/source,target=/workspace'))
+  assert.ok(args.includes('/workspace/app'))
+  assert.throws(() => containerBuildArgs('/source', '/source', { ...workload(), commands: { node_version: 'evil/image' } }, 'true'))
 })
 
 test('failed build reports failure without uploading or forwarding compiler output', async () => {
