@@ -78,7 +78,10 @@ async function simulatedRun(failBuild) {
       if (failBuild) throw new Error('Compiler failed')
       await mkdir(join(options.cwd, 'dist'))
     }
-    if (command === 'zip') await writeFile(args[3], 'PKzip-for-test')
+    if (command === 'zip') {
+      assert.equal(options.env.APP_VALUE, undefined)
+      await writeFile(args[3], 'PKzip-for-test')
+    }
   }
   let error
   try { await run(env, http, { execute, sleep: async () => {} }) } catch (caught) { error = caught }

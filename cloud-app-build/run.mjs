@@ -117,7 +117,6 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
   try {
     const workspace = await mkdtemp(join(env.RUNNER_TEMP || tmpdir(), 'tachyon-build-'))
     const checkout = join(workspace, 'source')
-    const childEnv = buildEnvironment(workload, env)
     const token = env.TACHYON_BUILD_GITHUB_TOKEN
     if (!token) throw new Error('GitHub read token is required for checkout')
     const auth = Buffer.from(`x-access-token:${token}`).toString('base64')
@@ -139,7 +138,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     let zip = output
     if ((await stat(output)).isDirectory()) {
       zip = join(workspace, 'artifact.zip')
-      await exec('zip', ['-q', '-r', '-y', zip, '.'], { cwd: output, env: childEnv })
+      await exec('zip', ['-q', '-r', '-y', zip, '.'], { cwd: output, env: checkoutEnv })
     } else if (!output.endsWith('.zip')) throw new Error('Artifact must be a directory or ZIP file')
     const size = (await stat(zip)).size
     if (size === 0 || size > 512 * 1024 * 1024) throw new Error('Invalid ZIP artifact size')
