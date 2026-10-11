@@ -20,7 +20,7 @@ Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actio
 }
 ```
 
-この JSON が `COMPUTE_GITHUB_ACTIONS_BINDINGS`、private S3 bucket 名が `COMPUTE_GITHUB_ACTIONS_BUCKET`。bucket は対象 Lambda と同じ AWS region に置き、API の AWS SDK もその region を使う。API role に `github-builds/*` の GetObject / PutObject を許可し、public access を全て block する。build ticket の保存値は SSE-S3 暗号化される。`github-builds/tickets/` prefix は 1 日で失効する lifecycle を設定する。**`github-builds/artifacts/` prefix の ZIP は Lambda の再デプロイで使うため、ticket と同じ短期削除 rule に含めない。** ticket は機密の build env を含むので、bucket の閲覧権限を利用者に与えない。
+この JSON が `COMPUTE_GITHUB_ACTIONS_BINDINGS`、private S3 bucket 名が `COMPUTE_GITHUB_ACTIONS_BUCKET`。bucket は対象 Lambda と同じ AWS region に置き、API の AWS SDK もその region を使う。API role に `github-builds/*` の GetObject / PutObject と、この専用 bucket の ListBucket（未作成 receipt を 404 と判定するため）を許可し、public access を全て block する。build ticket の保存値は SSE-S3 暗号化される。`github-builds/tickets/` prefix は 1 日で失効する lifecycle を設定する。**`github-builds/artifacts/` prefix の ZIP は Lambda の再デプロイで使うため、ticket と同じ短期削除 rule に含めない。** ticket は機密の build env を含むので、bucket の閲覧権限を利用者に与えない。
 
 4. Cloud App のビルド設定に `runnerBackend: github_actions` を指定する。`command` と `outputDirectory` を明示する。`outputDirectory` はビルド root 内のディレクトリ、または `.zip` ファイルを指定する。
 
@@ -55,12 +55,12 @@ spec:
   deploymentTarget: lambda
   build:
     runnerBackend: github_actions
-    installCommand: npm ci
+    installCommand: npm ci --include=dev
     command: npm run build
     outputDirectory: lambda.zip
 ```
 
-allowlist の `repository` は `quantum-box/tachyon-api-server-template`、`repository_id` は `1188397578`、`workflow` は `tachyon-build.yml`、`workflow_ref` は `refs/heads/main`。この sample は `tachyon.yaml` を持たないため、初回は app の build settings / API から同じ値を指定すると build-time IaC を有効にせず試せる。Lambda runtime は Node.js 22.x、handler は `index.handler` を設定する。
+allowlist の `repository` は `quantum-box/tachyon-api-server-template`、`repository_id` は `1188397578`、`workflow` は `tachyon-build.yml`、`workflow_ref` は `refs/heads/main`。この sample は `tachyon.yaml` を持たないため、初回は app の build settings / API から同じ値を指定すると build-time IaC を有効にせず試せる。sample の build workflow は Node.js 22 を使用する。Lambda の runtime は Tachyon の deploy 設定に従い、handler は `index.handler`。sample は `NODE_ENV=production` を app の環境変数に設定し、開発用 HTTP server の起動を止める。`npm ci --include=dev` により production 環境でも build 用依存をインストールする。
 
 ```sh
 node --test cloud-app-build/run.test.mjs
