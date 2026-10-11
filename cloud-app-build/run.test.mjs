@@ -52,7 +52,7 @@ test('checkout paths reject traversal, absolute paths, and symlink escapes', asy
   await assert.rejects(containedPath(checkout, 'outside'))
 })
 
-async function simulatedRun(failBuild, faults = [], uploadFault = null) {
+async function simulatedRun(failBuild, faults = [], uploadFault = null, completionResponse = null) {
   const requests = []
   const commands = []
   const waits = []
@@ -73,6 +73,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null) {
       if (fault.status) return new Response(null, { status: fault.status, headers: { 'Retry-After': '3' } })
     }
     if (String(url).endsWith('/workload')) return Response.json({ workload: workload(), upload_url: 'https://s3.example.com/artifact.zip?signature=secret', uploaded_artifact_size: uploadedSize })
+    if (String(url).endsWith('/complete') && completionResponse) return completionResponse(options)
     if (options.method === 'PUT') {
       for await (const chunk of options.body) assert.ok(chunk.length > 0)
       if (uploadFault !== 'missing') uploadedSize = Number(options.headers['Content-Length'])
@@ -193,4 +194,32 @@ test('ZIP payload corruption is rejected even with valid directory metadata', as
   bytes[40] ^= 0xff
   await writeFile(zip, bytes)
   await assert.rejects(validateLambdaZip(zip))
+})
+
+
+test('completion can wait beyond 30 seconds for Lambda deployment without duplicate callback', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(AbortSignal, 'timeout', milliseconds => {
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), milliseconds)
+    return controller.signal
+  })
+  let reportStarted
+  const started = new Promise(resolve => { reportStarted = resolve })
+  const pending = simulatedRun(false, [], null, options => {
+    reportStarted(options)
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })
+      setTimeout(() => resolve(new Response(null, { status: 204 })), 45_000)
+    })
+  })
+  const completion = await started
+  t.mock.timers.tick(45_000)
+  assert.equal(completion.signal.aborted, false)
+  const { requests, commands, error } = await pending
+  assert.ifError(error)
+  assert.equal(requests.filter(request => request.url.endsWith('/complete')).length, 1)
+  assert.equal(commands.filter(command => command.command === 'docker').length, 1)
+  assert.equal(requests.filter(request => request.options.method === 'PUT').length, 1)
+  assert.equal(requests.find(request => request.url.endsWith('/workload')).options.signal.aborted, true)
 })
