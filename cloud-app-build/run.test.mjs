@@ -52,9 +52,10 @@ test('checkout paths reject traversal, absolute paths, and symlink escapes', asy
   await assert.rejects(containedPath(checkout, 'outside'))
 })
 
-async function simulatedRun(failBuild) {
+async function simulatedRun(failBuild, faults = []) {
   const requests = []
   const commands = []
+  const waits = []
   const env = {
     TACHYON_BUILD_API_URL: 'https://api.example.com', TACHYON_BUILD_ID: `bld_${'a'.repeat(26)}`,
     TACHYON_BUILD_GITHUB_TOKEN: 'checkout-secret', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://oidc.example.com/token',
@@ -64,6 +65,10 @@ async function simulatedRun(failBuild) {
   const http = async (url, options) => {
     requests.push({ url: String(url), options })
     if (String(url).startsWith('https://oidc.example.com/')) return Response.json({ value: 'signed-oidc' })
+    if (faults[0] && String(url).endsWith(`/${faults[0].path}`)) {
+      const fault = faults.shift()
+      if (fault.status) return new Response(null, { status: fault.status, headers: { 'Retry-After': '3' } })
+    }
     if (String(url).endsWith('/workload')) return Response.json({ workload: workload(), upload_url: 'https://s3.example.com/artifact.zip?signature=secret' })
     if (options.method === 'PUT') {
       for await (const chunk of options.body) assert.ok(chunk.length > 0)
@@ -91,9 +96,25 @@ async function simulatedRun(failBuild) {
     }
   }
   let error
-  try { await run(env, http, { execute, sleep: async () => {} }) } catch (caught) { error = caught }
-  return { requests, commands, error }
+  try { await run(env, http, { execute, sleep: async ms => { waits.push(ms) } }) } catch (caught) { error = caught }
+  return { requests, commands, error, waits }
 }
+
+test('429 and transient storage failures retry initial, upload and completion authorization', async () => {
+  const faults = [
+    { path: 'workload', status: 429 }, { path: 'workload' },
+    { path: 'workload', status: 503 },
+    { path: 'complete', status: 429 }, { path: 'complete', status: 503 },
+  ]
+  const { requests, commands, error, waits } = await simulatedRun(false, faults)
+  assert.ifError(error)
+  assert.deepEqual(waits, [3000, 3000, 3000, 3000])
+  assert.equal(commands.filter(c => c.command === 'docker').length, 1)
+  assert.equal(requests.filter(r => r.options.method === 'PUT').length, 1)
+  const completions = requests.filter(r => r.url.endsWith('/complete'))
+  assert.equal(completions.length, 3)
+  assert.equal(new Set(completions.map(r => r.options.body)).size, 1)
+})
 
 test('dispatch contract checks out exact SHA, uploads once, and reports success with fresh OIDC', async () => {
   const { requests, commands, error } = await simulatedRun(false)

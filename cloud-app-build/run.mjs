@@ -103,13 +103,24 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
   async function request(path, options = {}) {
     return http(`${base}/${path}`, { ...options, headers: { ...options.headers, Authorization: `Bearer ${await oidc()}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) })
   }
-  let response
-  // A runner may start before the dispatch receipt and Build CAS are saved.
-  for (let attempt = 0; attempt < 12; attempt++) {
-    response = await request('workload')
-    if (response.ok || ![403, 409].includes(response.status)) break
-    await wait(2500)
+  async function requestWithRetry(path, options = {}, starting = false) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      let response
+      try { response = await request(path, options) } catch (error) {
+        if (attempt === 11) throw error
+        await wait(2500)
+        continue
+      }
+      // A runner may start before its dispatch receipt and Build CAS are saved.
+      const retry = response.status === 429 || response.status >= 500 || (starting && [403, 409].includes(response.status))
+      if (response.ok || !retry || attempt === 11) return response
+      const header = response.headers.get('Retry-After')
+      const seconds = header && /^\d+$/.test(header) ? Number(header) : NaN
+      const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header ?? '') - Date.now()
+      await wait(Number.isFinite(delay) ? Math.max(1000, Math.min(delay, 60_000)) : 2500)
+    }
   }
+  const response = await requestWithRetry('workload', {}, true)
   if (!response.ok) throw new Error(`Workload request failed (${response.status})`)
   const { workload } = await response.json()
   validateWorkload(workload)
@@ -147,7 +158,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     if (size === 0 || size > 512 * 1024 * 1024) throw new Error('Invalid ZIP artifact size')
     // Session credentials may expire while a long build runs; obtain a fresh
     // presigned URL only when the artifact is ready to upload.
-    const refreshed = await request('workload')
+    const refreshed = await requestWithRetry('workload')
     if (!refreshed.ok) throw new Error(`Upload authorization failed (${refreshed.status})`)
     const { upload_url: uploadUrl } = await refreshed.json()
     const upload = new URL(uploadUrl)
@@ -159,15 +170,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
   } catch (error) { buildError = error }
   // Refresh OIDC for long builds. Reuse an identical result on retries.
   const body = JSON.stringify({ success, duration_secs: Math.ceil((Date.now() - started) / 1000) })
-  let completed
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      completed = await request('complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
-      if (completed.ok) break
-      if (completed.status < 500) throw new Error(`Completion rejected (${completed.status})`)
-    } catch (error) { if (attempt === 3) throw error }
-    await wait(2000)
-  }
+  const completed = await requestWithRetry('complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
   if (!completed?.ok) throw new Error('Could not persist build completion')
   if (buildError) throw buildError
 }

@@ -45,7 +45,7 @@ spec:
 - 成功・失敗は durable receipt と既存 CompleteBuild へ反映する。通知が途絶えた場合は status polling で GHA の失敗・キャンセルを確認する。Tachyon のキャンセルは GHA run の cancel API へ連携する。
 - GHA 画面での rerun は拒否する。再試行は Tachyon から新しい build を作る。dispatch の応答が失われた run は機密 workload を取得できない。
 - Rust / Python など Node.js 以外の toolchain、Cloudflare、container image、IaC、D1、supplemental artifact は未対応。異なる target へ暗黙変換しない。
-- Cloud App のログ API は対応する GHA run へのリンクを返す。GHA ログ本文のミラーリングは行わない。callback は API process ごとに 120 requests / minute に制限する。
+- Cloud App のログ API は対応する GHA run へのリンクを返す。GHA ログ本文のミラーリングは行わない。認証済み callback は API process ごとに 120 requests / minute に制限する。認証前の未知鍵は JWKS refresh を 60 秒間隔に制限し、cached key での正当な認証は継続する。429 / 5xx は Retry-After に従って再試行する。
 
 ## 検証
 
