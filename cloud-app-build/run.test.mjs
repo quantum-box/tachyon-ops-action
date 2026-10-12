@@ -1,14 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, symlink, realpath, stat, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdtemp, mkdir, symlink, realpath, stat, writeFile, readFile } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, validateLambdaZip, validateWorkload, run } from './run.mjs'
+import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, validateCargoLambdaBootstrap, validateLambdaZip, validateWorkload, run } from './run.mjs'
+const executeFile = promisify(execFile)
 
 const workload = () => ({
   deployment_target: 'lambda', source: { repository_url: 'https://github.com/acme/app', commit_sha: 'a'.repeat(40) },
   commands: { build: 'npm run build' }, artifact: { output_directory: 'dist' },
   env: [{ name: 'APP_VALUE', value: 'value' }],
+})
+const cargoLambdaWorkload = () => ({
+  ...workload(), framework: 'cargo_lambda',
+  commands: { install: 'cargo fetch --locked', build: 'cargo lambda build --release --bin rust-api', binary: 'rust-api' },
+  artifact: { output_directory: 'target/lambda/rust-api' },
 })
 
 test('API must be a fixed HTTPS origin without credentials or query', () => {
@@ -21,7 +29,8 @@ test('API must be a fixed HTTPS origin without credentials or query', () => {
 test('rejects unsupported targets, callbacks, IaC, and floating source refs', () => {
   validateWorkload(workload())
   validateWorkload({ ...workload(), framework: 'serverless_functions' })
-  for (const framework of ['cargo_lambda', 'rust_server', 'docker', 'unknown']) {
+  validateWorkload(cargoLambdaWorkload())
+  for (const framework of ['rust_server', 'docker', 'unknown']) {
     assert.throws(() => validateWorkload({ ...workload(), framework }))
   }
   for (const name of ['FOO-BAR', '1TOKEN', '', 'ENV=INJECTED']) {
@@ -30,6 +39,11 @@ test('rejects unsupported targets, callbacks, IaC, and floating source refs', ()
   for (const mutation of [{ deployment_target: 'cloudflare_workers' }, { callback: { url: 'https://evil.test' } }, { iac: { operation: 'apply' } }, { d1: {} }, { commands: {} }, { artifact: {} }, { source: { repository_url: 'https://evil.test/app', commit_sha: 'main' } }]) {
     assert.throws(() => validateWorkload({ ...workload(), ...mutation }))
   }
+  for (const mutation of [
+    { commands: { ...cargoLambdaWorkload().commands, binary: '../rust-api' } },
+    { commands: { ...cargoLambdaWorkload().commands, install: null } },
+    { artifact: { output_directory: 'target/lambda/other' } },
+  ]) assert.throws(() => validateWorkload({ ...cargoLambdaWorkload(), ...mutation }))
 })
 
 test('build process never inherits runner credentials or workflow secrets', () => {
@@ -52,7 +66,7 @@ test('checkout paths reject traversal, absolute paths, and symlink escapes', asy
   await assert.rejects(containedPath(checkout, 'outside'))
 })
 
-async function simulatedRun(failBuild, faults = [], uploadFault = null, completionResponse = null) {
+async function simulatedRun(failBuild, faults = [], uploadFault = null, completionResponse = null, testWorkload = workload()) {
   const requests = []
   const commands = []
   const waits = []
@@ -72,7 +86,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null, completi
       const fault = faults.shift()
       if (fault.status) return new Response(null, { status: fault.status, headers: { 'Retry-After': '3' } })
     }
-    if (String(url).endsWith('/workload')) return Response.json({ workload: workload(), upload_url: 'https://s3.example.com/artifact.zip?signature=secret', uploaded_artifact_size: uploadedSize })
+    if (String(url).endsWith('/workload')) return Response.json({ workload: testWorkload, upload_url: 'https://s3.example.com/artifact.zip?signature=secret', uploaded_artifact_size: uploadedSize })
     if (String(url).endsWith('/complete') && completionResponse) return completionResponse(options)
     if (options.method === 'PUT') {
       for await (const chunk of options.body) assert.ok(chunk.length > 0)
@@ -92,14 +106,26 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null, completi
       assert.ok(args.includes('--platform=linux/amd64'))
       assert.ok(args.includes('--security-opt=no-new-privileges'))
       assert.ok(args.includes('--read-only'))
-      assert.ok(args.includes('public.ecr.aws/sam/build-nodejs22.x:latest'))
+      if (testWorkload.framework === 'cargo_lambda') assert.ok(args.includes('ghcr.io/cargo-lambda/cargo-lambda:1.9.2@sha256:02f2b32c5474b7c8bbf7e2432c609c1ab861a68cde471ba74857a4b4eefe8d07'))
+      else assert.ok(args.includes('public.ecr.aws/sam/build-nodejs22.x:latest'))
       assert.equal(args.some(arg => /checkout-secret|request-secret|docker.sock|--pid=host|--privileged/.test(arg)), false)
       if (failBuild) throw new Error('Compiler failed')
-      await mkdir(join(options.cwd, 'dist'))
+      if (testWorkload.framework === 'cargo_lambda') {
+        const output = join(options.cwd, testWorkload.artifact.output_directory)
+        await mkdir(output, { recursive: true })
+        const elf = Buffer.alloc(64)
+        elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1])
+        elf.writeUInt16LE(62, 18)
+        await writeFile(join(output, 'bootstrap'), elf, { mode: 0o755 })
+      } else await mkdir(join(options.cwd, 'dist'))
     }
     if (command === 'zip') {
       assert.equal(options.env.APP_VALUE, undefined)
-      await writeFile(args[3], Buffer.from('UEsDBBQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAaW5kZXgubWpzZXhwb3J0IGNvbnN0IGhhbmRsZXIgPSAoKSA9PiB7fVBLAQIUAxQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAAAAAAAAAAACAAQAAAABpbmRleC5tanNQSwUGAAAAAAEAAQA3AAAARgAAAAAA', 'base64'))
+      if (testWorkload.framework === 'cargo_lambda') await executeFile(command, args, options)
+      else {
+        await writeFile(join(options.cwd, 'index.mjs'), 'export const handler = async () => ({ statusCode: 200 })')
+        await executeFile(command, args, options)
+      }
     }
   }
   let error
@@ -148,6 +174,34 @@ test('container accepts only supported Node images and mounts the checkout alone
   assert.ok(args.includes('--memory=4g'))
   assert.ok(args.includes('--memory-swap=4g'))
   assert.throws(() => containerBuildArgs('/source', '/source', { ...workload(), commands: { node_version: 'evil/image' } }, 'true'))
+  const rustArgs = containerBuildArgs('/source', '/source/app', cargoLambdaWorkload(), 'cargo lambda build --release')
+  assert.ok(rustArgs.includes('--platform=linux/amd64'))
+  assert.ok(rustArgs.includes('--read-only'))
+  assert.ok(rustArgs.includes('ghcr.io/cargo-lambda/cargo-lambda:1.9.2@sha256:02f2b32c5474b7c8bbf7e2432c609c1ab861a68cde471ba74857a4b4eefe8d07'))
+  assert.ok(rustArgs.includes('PATH=/usr/local/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:/cargo-lambda:/zig:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'))
+  assert.ok(rustArgs.includes('RUSTUP_HOME=/usr/local/rustup'))
+  assert.ok(rustArgs.includes('CARGO_HOME=/workspace/.tachyon-cargo'))
+  assert.ok(rustArgs.includes('/.cache:rw,exec,nosuid,size=1g,mode=1777'))
+})
+
+test('cargo lambda artifact is uploaded only with executable x86_64 bootstrap at ZIP root', async () => {
+  const { requests, commands, error } = await simulatedRun(false, [], null, null, cargoLambdaWorkload())
+  assert.ifError(error)
+  assert.equal(commands.filter(c => c.command === 'docker').length, 2)
+  assert.equal(requests.filter(r => r.options.method === 'PUT').length, 1)
+  assert.equal(JSON.parse(requests.find(r => r.url.endsWith('/complete')).options.body).success, true)
+})
+
+test('cargo lambda bootstrap must be executable Linux x86_64 ELF', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tachyon-bootstrap-test-'))
+  const valid = Buffer.alloc(64)
+  valid.set([0x7f, 0x45, 0x4c, 0x46, 2, 1])
+  valid.writeUInt16LE(62, 18)
+  const path = join(root, 'bootstrap')
+  await writeFile(path, valid, { mode: 0o755 })
+  await validateCargoLambdaBootstrap(path)
+  await writeFile(path, Buffer.from('not ELF'), { mode: 0o755 })
+  await assert.rejects(validateCargoLambdaBootstrap(path), /x86_64 ELF/)
 })
 
 test('ambiguous uploads recover only when authenticated object size matches', async () => {
@@ -188,10 +242,13 @@ test('failed build reports failure without uploading or forwarding compiler outp
 test('ZIP payload corruption is rejected even with valid directory metadata', async () => {
   const root = await mkdtemp(join(tmpdir(), 'tachyon-corrupt-zip-'))
   const zip = join(root, 'artifact.zip')
-  const bytes = Buffer.from('UEsDBBQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAaW5kZXgubWpzZXhwb3J0IGNvbnN0IGhhbmRsZXIgPSAoKSA9PiB7fVBLAQIUAxQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAAAAAAAAAAACAAQAAAABpbmRleC5tanNQSwUGAAAAAAEAAQA3AAAARgAAAAAA', 'base64')
-  await writeFile(zip, bytes)
+  await writeFile(join(root, 'index.mjs'), 'export const handler = async () => ({ statusCode: 200 })')
+  await executeFile('zip', ['-q', '-r', zip, 'index.mjs'], { cwd: root })
+  const bytes = await readFile(zip)
   await validateLambdaZip(zip)
-  bytes[40] ^= 0xff
+  const payloadOffset = bytes.indexOf(Buffer.from('export'))
+  assert.notEqual(payloadOffset, -1)
+  bytes[payloadOffset] ^= 0xff
   await writeFile(zip, bytes)
   await assert.rejects(validateLambdaZip(zip))
 })

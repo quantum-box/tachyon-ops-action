@@ -1,12 +1,14 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
-import { createReadStream } from 'node:fs'
-import { mkdtemp, realpath, rm, stat } from 'node:fs/promises'
+import { constants, createReadStream } from 'node:fs'
+import { lstat, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const audience = 'tachyon-api/cloud-app-build'
+const cargoLambdaImage = 'ghcr.io/cargo-lambda/cargo-lambda:1.9.2@sha256:02f2b32c5474b7c8bbf7e2432c609c1ab861a68cde471ba74857a4b4eefe8d07'
+const cargoLambdaPath = '/usr/local/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:/cargo-lambda:/zig:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 const mask = value => console.log(`::add-mask::${String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`)
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -34,8 +36,8 @@ export function validateWorkload(workload) {
   if (workload.deployment_target !== 'lambda' || workload.iac || workload.d1 || workload.callback || workload.supplemental_artifacts?.length) {
     throw new Error('Only Lambda ZIP build workloads are supported')
   }
-  if (workload.framework != null && workload.framework !== 'serverless_functions') {
-    throw new Error('Only Node.js serverless function builds are supported')
+  if (workload.framework != null && !['serverless_functions', 'cargo_lambda'].includes(workload.framework)) {
+    throw new Error('Only Node.js serverless functions and native Cargo Lambda are supported')
   }
   if (!/^[a-f0-9]{40}$/i.test(workload.source?.commit_sha ?? '') || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(workload.source?.repository_url ?? '')) {
     throw new Error('A GitHub repository and exact commit SHA are required')
@@ -43,10 +45,35 @@ export function validateWorkload(workload) {
   if (!workload.commands?.build || !workload.artifact?.output_directory) {
     throw new Error('Explicit build command and ZIP output path are required')
   }
+  if (workload.framework === 'cargo_lambda') {
+    const binary = workload.commands.binary
+    if (!validCargoLambdaBinary(binary) || !workload.commands.install || workload.artifact.output_directory !== `target/lambda/${binary}`) {
+      throw new Error('Cargo Lambda requires an install command, safe binary name, and target/lambda/<binary> output directory')
+    }
+  }
   for (const item of workload.env ?? []) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.name) || typeof item.value !== 'string' || item.value_from != null) {
       throw new Error('Invalid build environment')
     }
+  }
+}
+
+function validCargoLambdaBinary(binary) {
+  return typeof binary === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(binary)
+}
+
+export async function validateCargoLambdaBootstrap(path) {
+  const info = await lstat(path)
+  if (!info.isFile() || (info.mode & 0o111) === 0) throw new Error('Cargo Lambda output must contain an executable bootstrap')
+  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  try {
+    const header = Buffer.alloc(20)
+    const { bytesRead } = await file.read(header, 0, header.length, 0)
+    if (bytesRead !== header.length || header[0] !== 0x7f || header.toString('ascii', 1, 4) !== 'ELF' || header[4] !== 2 || header[5] !== 1 || header.readUInt16LE(18) !== 62) {
+      throw new Error('Cargo Lambda bootstrap must be a Linux x86_64 ELF executable')
+    }
+  } finally {
+    await file.close()
   }
 }
 
@@ -74,8 +101,9 @@ export function buildEnvironment(workload, env) {
 }
 
 export function containerBuildArgs(checkout, cwd, workload, command) {
+  const isCargoLambda = workload.framework === 'cargo_lambda'
   const version = workload.commands.node_version || '22'
-  if (!['20', '22', '24'].includes(version)) throw new Error('Unsupported Node.js build version')
+  if (!isCargoLambda && !['20', '22', '24'].includes(version)) throw new Error('Unsupported Node.js build version')
   const vars = buildEnvironment(workload, {})
   const args = ['run', '--rm', '--init', '--platform=linux/amd64', '--cap-drop=ALL', '--security-opt=no-new-privileges',
     '--cpus=2', '--memory=4g', '--memory-swap=4g',
@@ -83,8 +111,15 @@ export function containerBuildArgs(checkout, cwd, workload, command) {
     '--user', `${process.getuid()}:${process.getgid()}`,
     '--mount', `type=bind,source=${checkout},target=/workspace`,
     '--workdir', `/workspace/${relative(checkout, cwd)}`, '--env', 'HOME=/tmp', '--env', 'CI=true']
+  if (isCargoLambda) args.push('--tmpfs', '/.cache:rw,exec,nosuid,size=1g,mode=1777')
   for (const [name, value] of Object.entries(vars)) args.push('--env', `${name}=${value}`)
-  args.push('--entrypoint', '/bin/bash', `public.ecr.aws/sam/build-nodejs${version}.x:latest`, '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
+  const image = isCargoLambda ? cargoLambdaImage : `public.ecr.aws/sam/build-nodejs${version}.x:latest`
+  if (isCargoLambda) {
+    // Keep Cargo's registry cache in the temporary checkout so install/build
+    // containers share downloads without writing to the read-only image.
+    args.push('--env', `PATH=${cargoLambdaPath}`, '--env', 'RUSTUP_HOME=/usr/local/rustup', '--env', 'CARGO_HOME=/workspace/.tachyon-cargo')
+  }
+  args.push('--entrypoint', '/bin/bash', image, '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
   return args
 }
 
@@ -118,7 +153,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     return value
   }
   async function request(path, options = {}) {
-    // Completion also waits for Lambda deployment and its serving probe.
+    // Allow rolling API deployments and durable completion recording to settle.
     const timeoutMs = path === 'complete' ? 120_000 : 30_000
     return http(`${base}/${path}`, { ...options, headers: { ...options.headers, Authorization: `Bearer ${await oidc()}` }, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) })
   }
@@ -170,6 +205,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
       await exec('docker', containerBuildArgs(checkout, cwd, workload, command), { cwd, env: checkoutEnv })
     }
     const output = await containedPath(cwd, workload.artifact.output_directory)
+    if (workload.framework === 'cargo_lambda') await validateCargoLambdaBootstrap(join(output, 'bootstrap'))
     let zip = output
     if ((await stat(output)).isDirectory()) {
       zip = join(workspace, 'artifact.zip')
@@ -178,6 +214,12 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     const size = (await stat(zip)).size
     if (size === 0 || size > 512 * 1024 * 1024) throw new Error('Invalid ZIP artifact size')
     await validateLambdaZip(zip)
+    if (workload.framework === 'cargo_lambda') {
+      const { stdout } = await promisify(execFile)('unzip', ['-Z', '-1', zip], {
+        env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' }, timeout: 30_000, maxBuffer: 32 * 1024,
+      })
+      if (!stdout.split(/\r?\n/).includes('bootstrap')) throw new Error('Cargo Lambda ZIP must place bootstrap at its root')
+    }
     // Session credentials may expire while a long build runs; obtain a fresh
     // presigned URL only when the artifact is ready to upload.
     const refreshed = await requestWithRetry('workload')
