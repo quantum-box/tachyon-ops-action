@@ -1,5 +1,5 @@
 name: Tachyon Cloud App build
-description: Build a dispatched Lambda ZIP and return it to Tachyon using GitHub OIDC
+description: Build a dispatched Node.js or Rust Lambda ZIP and return it to Tachyon using GitHub OIDC
 inputs:
   api-url:
     description: Trusted Tachyon API origin; override only in the protected workflow, not dispatch inputs
