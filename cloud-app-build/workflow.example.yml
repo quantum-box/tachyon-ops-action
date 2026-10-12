@@ -25,5 +25,4 @@ jobs:
       # Pin the Action to the reviewed implementation commit before use.
       - uses: quantum-box/tachyon-ops-action/cloud-app-build@REPLACE_WITH_COMMIT_SHA
         with:
-          api-url: https://api.n1.tachy.one
           build-id: ${{ inputs.build_id }}
