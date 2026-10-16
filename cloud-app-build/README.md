@@ -1,11 +1,11 @@
 # Tachyon Cloud App build Action
 
-Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actions runner で実行する。初期版は **Node.js の Lambda ZIP のみ**。ビルド後の Lambda デプロイは Tachyon が行う。
+Tachyon が受け付けた Cloud App のビルドを、利用者の GitHub Actions runner で実行する。対象は **Node.js と `cargo lambda`（Rust）の Lambda ZIP**。ビルド後の Lambda デプロイは Tachyon が行う。
 
 ## 導入
 
 1. 公開 Action `quantum-box/tachyon-ops-action/cloud-app-build` を利用する。`workflow.example.yml` を対象 repo の `.github/workflows/tachyon-build.yml` に配置し、`REPLACE_WITH_COMMIT_SHA` を配布先のレビュー済み commit SHA に置き換える。`tachyon-apps` は private のため、公開 sample の workflow から直接参照しない。
-2. `api-url` を省略すると `https://api.n1.tachy.one` を使う。別のTachyon API環境を使う場合だけ、protected workflow の `api-url` にその HTTPS origin を指定する。dispatch input から API URL、コマンド、secret を受け取らない。runner は GitHub-hosted Linux（例: `ubuntu-latest`）に限定し、Node 20 以上、Docker、Git、Bash、zip / unzip が必要。永続 self-hosted runner は workspace の容量 quota を保証できないため初期版では拒否する。container の CPU は 2、memory / swap 合計は 4 GiB に制限し、workspace は job ごとの一時 VM と終了時 cleanup に限定する。install/build は PID namespace を分離した Docker container 内で実行し、host の OIDC process・home・Docker socket を mount しない。`nodeVersion` は 20 / 22 / 24（未指定は 22）を選べる。framework は `serverless_functions` または未指定に限定する。container には Node.js と npm があり、host に追加した Rust / Python / native build tool は使えない。
+2. `api-url` を省略すると `https://api.n1.tachy.one` を使う。別のTachyon API環境を使う場合だけ、protected workflow の `api-url` にその HTTPS origin を指定する。dispatch input から API URL、コマンド、secret を受け取らない。runner は GitHub-hosted Linux（例: `ubuntu-latest`）に限定し、Node 20 以上、Docker、Git、Bash、zip / unzip が必要。永続 self-hosted runner は workspace の容量 quota を保証できないため初期版では拒否する。container の CPU は 2、memory / swap 合計は 4 GiB に制限し、workspace は job ごとの一時 VM と終了時 cleanup に限定する。install/build は PID namespace を分離した Docker container 内で実行し、host の OIDC process・home・Docker socket を mount しない。Node.js の build では `nodeVersion` は 20 / 22 / 24（未指定は 22）を選べ、framework は `serverless_functions` または未指定に限定する。その container には Node.js と npm があり、host に追加した Rust / Python / native build tool は使えない。`cargo lambda` の build は後述の「cargo lambda（Rust）」を参照。
 3. operator が API に次の設定を渡す。GitHub App には対象 repository の Contents read / Actions write を与える。repository の作成・設定変更は governance Terraform 経由で行う。
 
 ```json
@@ -46,7 +46,8 @@ spec:
 - 完了callbackはLambda deploymentとserving確認を待つため1 requestの制限を120秒にする。OIDC/workload requestは30秒のまま。いずれも最大12回の再試行に限定する。
 - 成功・失敗は durable receipt と既存 CompleteBuild へ反映する。通知が途絶えた場合は status polling で GHA の失敗・キャンセルを確認する。Tachyon のキャンセルは GHA run の cancel API へ連携する。
 - GHA 画面での rerun は拒否する。再試行は Tachyon から新しい build を作る。dispatch の応答が失われた run は機密 workload を取得できない。
-- Rust / Python など Node.js 以外の toolchain、Cloudflare、container image、IaC、D1、supplemental artifact、secret reference は未対応。異なる target へ暗黙変換しない。
+- Python など Node.js / `cargo lambda` 以外の toolchain、`rust_server`、Cloudflare、container image、IaC、D1、supplemental artifact は未対応。異なる target へ暗黙変換しない。
+- secret 参照（`$secret_ref:`、`type: credential`、`valueFrom.secret` など）から解決した値は build の環境変数に渡さない。`is_secret` フラグがなくても参照の構文で判定する。ticket は利用者の runner と PR preview の build に配られるため。Lambda の実行時の環境変数は Tachyon が deploy 時に別に解決するので影響しない。build 時に secret が必要な app は GHA backend を使えない。
 - Cloud App のログ API は対応する GHA run へのリンクを返す。GHA ログ本文のミラーリングは行わない。認証済み callback は API process ごとに 120 requests / minute に制限する。認証前の未知鍵は JWKS refresh を 60 秒間隔に制限し、cached key での正当な認証は継続する。429 / 5xx は Retry-After に従って再試行する。
 
 ## 検証
@@ -72,7 +73,29 @@ node --test .github/actions/cloud-app-build/run.test.mjs
 
 実環境では、1 app で開始・成功・Lambda deploy を確認した後、キャンセルと別 run / rerun の OIDC 拒否を確認する。既定 runner は Kata のまま。戻す場合は app の runner を変更し、進行中 GHA build が終了するまで API の GHA 設定を維持する。
 
-GHA backend は `linux/amd64` / Lambda `x86_64` に固定し、ARM の deployment override を拒否する。Node version は Build の route snapshot に保存するため、GHA provider 設定を解除した後も再デプロイできる。
+Node.js の build は `linux/amd64` / Lambda `x86_64` に固定し、ARM の deployment override を拒否する。Node version は Build の route snapshot に保存するため、GHA provider 設定を解除した後も再デプロイできる。
+
+## cargo lambda（Rust）
+
+`framework: cargo_lambda` の app は、`build.binary` と `build.arch`（`arm64` / `x86_64`、未指定は `arm64`）から artifact profile が決まる。Lambda は `bootstrap` / `provided.al2023` / その architecture で deploy され、矛盾する architecture の deployment override は拒否する。
+
+```yaml
+spec:
+  deploymentTarget: lambda
+  framework: cargo_lambda
+  rootDirectory: apps/api
+  build:
+    runnerBackend: github_actions
+    binary: lambda-api
+    arch: arm64
+    installCommand: rustup toolchain install
+    command: cargo lambda build --release --arm64 --bin lambda-api
+```
+
+- `outputDirectory` は指定しない。成果物は repository root の `target/lambda/<binary>` に固定される。container の `CARGO_TARGET_DIR` は checkout root の `target` なので、`--lambda-dir` を付けない `cargo lambda build` の既定の出力先がこれに一致する。`--lambda-dir` や `--flatten` で出力先を変える場合も、`$CARGO_TARGET_DIR/lambda/<binary>/bootstrap` になるようにする。その中の `bootstrap` が ZIP の root になる。Action は `bootstrap` が通常ファイルの ELF で、profile の architecture 向けであることを upload 前に確認する。
+- workflow は `rust-builder-image` に digest 固定の image（`name@sha256:...`）を渡す。image には `rustup`（proxy のみでよい）、`cargo-lambda`、`zig`、`protoc`、`bash` を PATH 上に置く。container の rootfs は read-only・非 root なので、`yum` / `pip` でのインストールはできない。toolchain は `CARGO_HOME=/tools/cargo` / `RUSTUP_HOME=/tools/rustup`（書き込み可能）に `installCommand` で入れる。`CARGO_TARGET_DIR` は `/workspace/target`。
+- container は runner の全 CPU とメモリの 75%（下限 4 GiB）、`/tmp` 4 GiB を使う。arm64 の成果物は amd64 の runner 上で zig による cross build で作る。
+- 現時点では Cargo のキャッシュを保存しない。profile の `cache_scope`（production / preview の分離）は将来のキャッシュ導入のための予約で、Action は読み捨てる。
 
 アップロードには署名対象の `status=pending` tag を必須とし、未確定の ZIP は S3 lifecycle で 1 日後から削除対象にする。成功 receipt を保存した ZIP だけ `status=complete` へ変更して保持する。キャンセルは GitHub API を呼ぶ前に変更不可の失敗 receipt を保存するため、遅れて届いた完了通知が成果物を保持することはない。GHA build では Tachyon の credit-consumption attempt を作成しない。
 

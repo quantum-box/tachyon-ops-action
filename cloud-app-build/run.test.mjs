@@ -1,15 +1,31 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, symlink, realpath, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { chmod, mkdtemp, mkdir, symlink, realpath, stat, writeFile } from 'node:fs/promises'
+import { availableParallelism, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, validateLambdaZip, validateWorkload, run } from './run.mjs'
+import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, rustBuilderImage, validateLambdaZip, validateWorkload, verifyBootstrap, run } from './run.mjs'
 
 const workload = () => ({
   deployment_target: 'lambda', source: { repository_url: 'https://github.com/acme/app', commit_sha: 'a'.repeat(40) },
   commands: { build: 'npm run build' }, artifact: { output_directory: 'dist' },
   env: [{ name: 'APP_VALUE', value: 'value' }],
 })
+const rustImage = `ghcr.io/acme/rust-builder@sha256:${'b'.repeat(64)}`
+const cargoProfile = () => ({ kind: 'cargo_lambda', architecture: 'arm64', output_base: 'checkout', cache_scope: 'production' })
+const cargoWorkload = () => ({
+  ...workload(), framework: 'cargo_lambda', workspace: { root_directory: 'apps/api' },
+  commands: { install: 'rustup show', build: 'cargo lambda build --release --arm64', binary: 'lambda-api' },
+  artifact: { output_directory: 'target/lambda/lambda-api' },
+})
+// Minimal ELF64 little-endian header with the given e_machine.
+const elf = machine => {
+  const header = Buffer.alloc(64)
+  header.writeUInt32BE(0x7f454c46, 0)
+  header[4] = 2
+  header[5] = 1
+  header.writeUInt16LE(machine, 18)
+  return header
+}
 
 test('API must be a fixed HTTPS origin without credentials or query', () => {
   assert.equal(apiOrigin('https://api.example.com'), 'https://api.example.com')
@@ -52,7 +68,7 @@ test('checkout paths reject traversal, absolute paths, and symlink escapes', asy
   await assert.rejects(containedPath(checkout, 'outside'))
 })
 
-async function simulatedRun(failBuild, faults = [], uploadFault = null, completionResponse = null) {
+async function simulatedRun(failBuild, faults = [], uploadFault = null, completionResponse = null, cargo = null) {
   const requests = []
   const commands = []
   const waits = []
@@ -63,6 +79,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null, completi
     AWS_SECRET_ACCESS_KEY: 'must-not-reach-build',
     RUNNER_ENVIRONMENT: 'github-hosted',
     RUNNER_OS: 'Linux',
+    ...(cargo ? { TACHYON_BUILD_RUST_IMAGE: rustImage } : {}),
   }
   let uploadedSize = null
   const http = async (url, options) => {
@@ -72,7 +89,7 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null, completi
       const fault = faults.shift()
       if (fault.status) return new Response(null, { status: fault.status, headers: { 'Retry-After': '3' } })
     }
-    if (String(url).endsWith('/workload')) return Response.json({ workload: workload(), upload_url: 'https://s3.example.com/artifact.zip?signature=secret', uploaded_artifact_size: uploadedSize })
+    if (String(url).endsWith('/workload')) return Response.json({ ...(cargo ? { workload: cargoWorkload(), profile: cargoProfile() } : { workload: workload() }), upload_url: 'https://s3.example.com/artifact.zip?signature=secret', uploaded_artifact_size: uploadedSize })
     if (String(url).endsWith('/complete') && completionResponse) return completionResponse(options)
     if (options.method === 'PUT') {
       for await (const chunk of options.body) assert.ok(chunk.length > 0)
@@ -92,11 +109,20 @@ async function simulatedRun(failBuild, faults = [], uploadFault = null, completi
       assert.ok(args.includes('--platform=linux/amd64'))
       assert.ok(args.includes('--security-opt=no-new-privileges'))
       assert.ok(args.includes('--read-only'))
-      assert.ok(args.includes('public.ecr.aws/sam/build-nodejs22.x:latest'))
+      assert.ok(args.includes(cargo ? rustImage : 'public.ecr.aws/sam/build-nodejs22.x:latest'))
       assert.equal(args.some(arg => /checkout-secret|request-secret|docker.sock|--pid=host|--privileged/.test(arg)), false)
       if (failBuild) throw new Error('Compiler failed')
-      await mkdir(join(options.cwd, 'dist'))
+      if (cargo) {
+        // Install and build both run; the artifact appears after the build.
+        if (args.at(-1).startsWith('cargo lambda')) {
+          const checkout = commands.find(c => c.command === 'git' && c.args[0] === 'init').args[1]
+          const output = join(checkout, 'target/lambda/lambda-api')
+          await mkdir(output, { recursive: true })
+          await writeFile(join(output, 'bootstrap'), elf(cargo.machine), { mode: 0o755 })
+        }
+      } else await mkdir(join(options.cwd, 'dist'))
     }
+    if (command === 'git' && args[0] === 'checkout' && cargo) await mkdir(join(options.cwd, 'apps/api'), { recursive: true })
     if (command === 'zip') {
       assert.equal(options.env.APP_VALUE, undefined)
       await writeFile(args[3], Buffer.from('UEsDBBQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAaW5kZXgubWpzZXhwb3J0IGNvbnN0IGhhbmRsZXIgPSAoKSA9PiB7fVBLAQIUAxQAAAAAAIN4S12aTqguHwAAAB8AAAAJAAAAAAAAAAAAAACAAQAAAABpbmRleC5tanNQSwUGAAAAAAEAAQA3AAAARgAAAAAA', 'base64'))
@@ -222,4 +248,67 @@ test('completion can wait beyond 30 seconds for Lambda deployment without duplic
   assert.equal(commands.filter(command => command.command === 'docker').length, 1)
   assert.equal(requests.filter(request => request.options.method === 'PUT').length, 1)
   assert.equal(requests.find(request => request.url.endsWith('/workload')).options.signal.aborted, true)
+})
+
+
+test('cargo lambda workloads must match the fixed profile', () => {
+  validateWorkload(cargoWorkload(), cargoProfile())
+  assert.throws(() => validateWorkload(cargoWorkload()))
+  assert.throws(() => validateWorkload(workload(), cargoProfile()))
+  for (const mutation of [
+    { artifact: { output_directory: 'dist' } },
+    { artifact: { output_directory: 'target/lambda/other' } },
+    { commands: { build: 'cargo lambda build', binary: '../bootstrap' } },
+    { framework: 'rust_server' },
+  ]) {
+    assert.throws(() => validateWorkload({ ...cargoWorkload(), ...mutation }, cargoProfile()))
+  }
+  for (const mutation of [{ architecture: 'amd64' }, { output_base: 'workspace' }, { kind: 'python' }]) {
+    assert.throws(() => validateWorkload(cargoWorkload(), { ...cargoProfile(), ...mutation }))
+  }
+})
+
+test('Rust container uses a digest-pinned image and writable tool homes only', () => {
+  assert.throws(() => rustBuilderImage('ghcr.io/acme/rust-builder:latest'))
+  assert.throws(() => rustBuilderImage(''))
+  const args = containerBuildArgs('/source', '/source/apps/api', cargoWorkload(), 'cargo lambda build', cargoProfile(), { rustImage, toolsDir: '/runner/tools' })
+  assert.ok(args.includes(rustImage))
+  assert.ok(args.includes('type=bind,source=/runner/tools,target=/tools'))
+  assert.ok(args.includes('CARGO_HOME=/tools/cargo'))
+  assert.ok(args.includes('RUSTUP_HOME=/tools/rustup'))
+  assert.ok(args.includes('CARGO_TARGET_DIR=/workspace/target'))
+  assert.ok(args.includes('--read-only'))
+  assert.ok(args.includes('--cap-drop=ALL'))
+  assert.ok(args.includes(`--cpus=${availableParallelism()}`))
+  assert.equal(args.some(arg => /docker.sock|--privileged/.test(arg)), false)
+  assert.throws(() => containerBuildArgs('/source', '/source', cargoWorkload(), 'true', cargoProfile(), { toolsDir: '/runner/tools' }))
+})
+
+test('bootstrap must be a regular ELF for the profile architecture', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tachyon-bootstrap-'))
+  await assert.rejects(verifyBootstrap(root, 'arm64'), /regular bootstrap/)
+  await writeFile(join(root, 'bootstrap'), elf(183), { mode: 0o644 })
+  await assert.rejects(verifyBootstrap(root, 'arm64'), /executable/)
+  await chmod(join(root, 'bootstrap'), 0o755)
+  await verifyBootstrap(root, 'arm64')
+  await assert.rejects(verifyBootstrap(root, 'x86_64'), /x86_64/)
+  await writeFile(join(root, 'bootstrap'), Buffer.from('#!/bin/sh\n'.padEnd(64)))
+  await assert.rejects(verifyBootstrap(root, 'arm64'), /ELF/)
+  const linked = await mkdtemp(join(tmpdir(), 'tachyon-bootstrap-link-'))
+  await symlink(join(root, 'bootstrap'), join(linked, 'bootstrap'))
+  await assert.rejects(verifyBootstrap(linked, 'arm64'), /regular bootstrap/)
+})
+
+test('cargo lambda run reads the artifact from the checkout root and checks its architecture', async () => {
+  const ok = await simulatedRun(false, [], null, null, { machine: 183 })
+  assert.ifError(ok.error)
+  assert.equal(ok.commands.filter(c => c.command === 'docker').length, 2)
+  const zip = ok.commands.find(c => c.command === 'zip')
+  assert.match(zip.options.cwd, /source\/target\/lambda\/lambda-api$/)
+  assert.equal(JSON.parse(ok.requests.find(r => r.url.endsWith('/complete')).options.body).success, true)
+
+  const wrong = await simulatedRun(false, [], null, null, { machine: 62 })
+  assert.match(wrong.error.message, /not built for arm64/)
+  assert.equal(wrong.requests.filter(r => r.options.method === 'PUT').length, 0)
+  assert.equal(JSON.parse(wrong.requests.find(r => r.url.endsWith('/complete')).options.body).success, false)
 })

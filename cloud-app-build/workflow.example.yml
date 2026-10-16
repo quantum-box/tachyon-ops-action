@@ -26,3 +26,5 @@ jobs:
       - uses: quantum-box/tachyon-ops-action/cloud-app-build@REPLACE_WITH_COMMIT_SHA
         with:
           build-id: ${{ inputs.build_id }}
+          # cargo lambda apps only: a digest-pinned toolchain image.
+          # rust-builder-image: ghcr.io/OWNER/IMAGE@sha256:REPLACE_WITH_DIGEST
