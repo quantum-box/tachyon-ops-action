@@ -284,6 +284,14 @@ test('Rust container uses a digest-pinned image and writable tool homes only', (
   assert.throws(() => containerBuildArgs('/source', '/source', cargoWorkload(), 'true', cargoProfile(), { toolsDir: '/runner/tools' }))
 })
 
+test('workload env cannot redirect the Action-controlled paths', () => {
+  const names = ['CARGO_HOME', 'RUSTUP_HOME', 'CARGO_TARGET_DIR', 'HOME', 'CI']
+  const env = names.map(name => ({ name, value: '/tmp/elsewhere' }))
+  const args = containerBuildArgs('/source', '/source/apps/api', { ...cargoWorkload(), env }, 'cargo lambda build', cargoProfile(), { rustImage, toolsDir: '/runner/tools' })
+  const last = Object.fromEntries(args.flatMap((arg, i) => args[i - 1] === '--env' ? [arg.split('=')] : []).map(([name, ...value]) => [name, value.join('=')]))
+  assert.deepEqual(names.map(name => last[name]), ['/tools/cargo', '/tools/rustup', '/workspace/target', '/tmp', 'true'])
+})
+
 test('bootstrap must be a regular ELF for the profile architecture', async () => {
   const root = await mkdtemp(join(tmpdir(), 'tachyon-bootstrap-'))
   await assert.rejects(verifyBootstrap(root, 'arm64'), /regular bootstrap/)

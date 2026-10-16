@@ -117,14 +117,15 @@ export function containerBuildArgs(checkout, cwd, workload, command, profile = n
     `--pids-limit=${rust ? 4096 : 512}`, '--read-only', '--tmpfs', `/tmp:rw,exec,nosuid,size=${rust ? '4g' : '1g'}`,
     '--user', `${process.getuid()}:${process.getgid()}`,
     '--mount', `type=bind,source=${checkout},target=/workspace`]
-  if (rust) {
-    // rustup and Cargo write toolchains and the registry here; the image's
-    // own homes stay read-only.
-    args.push('--mount', `type=bind,source=${options.toolsDir},target=/tools`,
-      '--env', 'CARGO_HOME=/tools/cargo', '--env', 'RUSTUP_HOME=/tools/rustup', '--env', 'CARGO_TARGET_DIR=/workspace/target')
-  }
-  args.push('--workdir', `/workspace/${relative(checkout, cwd)}`, '--env', 'HOME=/tmp', '--env', 'CI=true')
+  // rustup and Cargo write toolchains and the registry here; the image's
+  // own homes stay read-only.
+  if (rust) args.push('--mount', `type=bind,source=${options.toolsDir},target=/tools`)
+  args.push('--workdir', `/workspace/${relative(checkout, cwd)}`)
   for (const [name, value] of Object.entries(vars)) args.push('--env', `${name}=${value}`)
+  // Docker keeps the last --env for a name, so the Action's paths come after
+  // the workload's and cannot be redirected by it.
+  args.push('--env', 'HOME=/tmp', '--env', 'CI=true')
+  if (rust) args.push('--env', 'CARGO_HOME=/tools/cargo', '--env', 'RUSTUP_HOME=/tools/rustup', '--env', 'CARGO_TARGET_DIR=/workspace/target')
   args.push('--entrypoint', '/bin/bash', image, '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
   return args
 }
