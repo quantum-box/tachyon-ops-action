@@ -1,8 +1,8 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createReadStream } from 'node:fs'
-import { mkdtemp, realpath, rm, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { lstat, mkdir, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises'
+import { availableParallelism, tmpdir, totalmem } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -30,13 +30,28 @@ export function apiOrigin(value) {
   return url.origin
 }
 
-export function validateWorkload(workload) {
+// Responses from an API that predates build profiles describe Node.js builds.
+export const nodeProfile = Object.freeze({ kind: 'node_js', architecture: 'x86_64', output_base: 'workspace', cache_scope: 'production' })
+const elfMachines = { arm64: 183, x86_64: 62 }
+
+export function validateWorkload(workload, profile = nodeProfile) {
   if (workload.deployment_target !== 'lambda' || workload.iac || workload.d1 || workload.callback || workload.supplemental_artifacts?.length) {
     throw new Error('Only Lambda ZIP build workloads are supported')
   }
-  if (workload.framework != null && workload.framework !== 'serverless_functions') {
-    throw new Error('Only Node.js serverless function builds are supported')
-  }
+  if (profile.kind === 'node_js') {
+    if (workload.framework != null && workload.framework !== 'serverless_functions') {
+      throw new Error('Only Node.js serverless function builds are supported')
+    }
+    if (profile.architecture !== 'x86_64' || profile.output_base !== 'workspace') throw new Error('Invalid Node.js build profile')
+  } else if (profile.kind === 'cargo_lambda') {
+    // The control plane fixes where the artifact lands; never let a workload
+    // redirect which files become the deployed ZIP.
+    const binary = workload.commands?.binary ?? ''
+    if (workload.framework !== 'cargo_lambda' || !(profile.architecture in elfMachines) || profile.output_base !== 'checkout' ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(binary) || workload.artifact?.output_directory !== `target/lambda/${binary}`) {
+      throw new Error('Invalid cargo lambda build profile')
+    }
+  } else throw new Error('Unsupported build profile')
   if (!/^[a-f0-9]{40}$/i.test(workload.source?.commit_sha ?? '') || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(workload.source?.repository_url ?? '')) {
     throw new Error('A GitHub repository and exact commit SHA are required')
   }
@@ -73,19 +88,61 @@ export function buildEnvironment(workload, env) {
   return result
 }
 
-export function containerBuildArgs(checkout, cwd, workload, command) {
-  const version = workload.commands.node_version || '22'
-  if (!['20', '22', '24'].includes(version)) throw new Error('Unsupported Node.js build version')
+export function rustBuilderImage(image) {
+  // The protected workflow chooses the toolchain image; pin it so a tag push
+  // cannot change what compiles a production artifact.
+  if (!/^[a-z0-9][a-z0-9._\/:-]*@sha256:[a-f0-9]{64}$/.test(image ?? '')) throw new Error('rust-builder-image must be pinned by sha256 digest')
+  return image
+}
+
+// `options` is required for cargo lambda: { rustImage, toolsDir }. Node.js
+// builds keep the original fixed limits.
+export function containerBuildArgs(checkout, cwd, workload, command, profile = nodeProfile, options = {}) {
+  const rust = profile.kind === 'cargo_lambda'
+  let image
+  if (rust) {
+    image = rustBuilderImage(options.rustImage)
+    if (!options.toolsDir) throw new Error('A writable toolchain directory is required')
+  } else {
+    const version = workload.commands.node_version || '22'
+    if (!['20', '22', '24'].includes(version)) throw new Error('Unsupported Node.js build version')
+    image = `public.ecr.aws/sam/build-nodejs${version}.x:latest`
+  }
   const vars = buildEnvironment(workload, {})
+  // Release builds of a large Cargo workspace need the whole VM; the job is
+  // already confined to a single ephemeral runner.
+  const memory = rust ? `${Math.max(4 * 1024 ** 3, Math.floor(totalmem() * 0.75))}` : '4g'
   const args = ['run', '--rm', '--init', '--platform=linux/amd64', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-    '--cpus=2', '--memory=4g', '--memory-swap=4g',
-    '--pids-limit=512', '--read-only', '--tmpfs', '/tmp:rw,exec,nosuid,size=1g',
+    `--cpus=${rust ? availableParallelism() : 2}`, `--memory=${memory}`, `--memory-swap=${memory}`,
+    `--pids-limit=${rust ? 4096 : 512}`, '--read-only', '--tmpfs', `/tmp:rw,exec,nosuid,size=${rust ? '4g' : '1g'}`,
     '--user', `${process.getuid()}:${process.getgid()}`,
-    '--mount', `type=bind,source=${checkout},target=/workspace`,
-    '--workdir', `/workspace/${relative(checkout, cwd)}`, '--env', 'HOME=/tmp', '--env', 'CI=true']
+    '--mount', `type=bind,source=${checkout},target=/workspace`]
+  if (rust) {
+    // rustup and Cargo write toolchains and the registry here; the image's
+    // own homes stay read-only.
+    args.push('--mount', `type=bind,source=${options.toolsDir},target=/tools`,
+      '--env', 'CARGO_HOME=/tools/cargo', '--env', 'RUSTUP_HOME=/tools/rustup', '--env', 'CARGO_TARGET_DIR=/workspace/target')
+  }
+  args.push('--workdir', `/workspace/${relative(checkout, cwd)}`, '--env', 'HOME=/tmp', '--env', 'CI=true')
   for (const [name, value] of Object.entries(vars)) args.push('--env', `${name}=${value}`)
-  args.push('--entrypoint', '/bin/bash', `public.ecr.aws/sam/build-nodejs${version}.x:latest`, '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
+  args.push('--entrypoint', '/bin/bash', image, '--noprofile', '--norc', '-eo', 'pipefail', '-c', command)
   return args
+}
+
+// Fail an artifact built for the wrong platform before it is uploaded. The
+// deployed runtime and architecture still come from Tachyon's build snapshot.
+export async function verifyBootstrap(directory, architecture) {
+  const path = join(directory, 'bootstrap')
+  const info = await lstat(path).catch(() => null)
+  if (!info?.isFile()) throw new Error('cargo lambda artifact must contain a regular bootstrap file')
+  // Lambda refuses a custom runtime whose bootstrap is not executable, and
+  // packaging keeps the file mode as built.
+  if ((info.mode & 0o111) === 0) throw new Error('bootstrap must be executable')
+  const file = await open(path, 'r')
+  const header = Buffer.alloc(20)
+  try { await file.read(header, 0, 20, 0) } finally { await file.close() }
+  if (header.readUInt32BE(0) !== 0x7f454c46 || header[4] !== 2 || header[5] !== 1) throw new Error('bootstrap is not a 64-bit little-endian ELF executable')
+  if (header.readUInt16LE(18) !== elfMachines[architecture]) throw new Error(`bootstrap was not built for ${architecture}`)
 }
 
 function execute(command, args, options) {
@@ -142,8 +199,10 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
   }
   const response = await requestWithRetry('workload', {}, true)
   if (!response.ok) throw new Error(`Workload request failed (${response.status})`)
-  const { workload } = await response.json()
-  validateWorkload(workload)
+  const { workload, profile = nodeProfile } = await response.json()
+  validateWorkload(workload, profile)
+  const rust = profile.kind === 'cargo_lambda'
+  const rustImage = rust ? rustBuilderImage(env.TACHYON_BUILD_RUST_IMAGE) : undefined
   for (const item of workload.env ?? []) if (item.value) mask(item.value)
   const started = Date.now()
   let success = false
@@ -166,10 +225,13 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
     const cwd = await containedPath(checkout, workload.workspace?.root_directory || '.')
     // Repository code runs in a separate PID namespace, with no host process,
     // runner-home or Docker-socket mount and no OIDC/GitHub credentials.
+    const toolsDir = join(workspace, 'tools')
+    if (rust) await mkdir(toolsDir)
     for (const command of [workload.commands.install, workload.commands.build].filter(Boolean)) {
-      await exec('docker', containerBuildArgs(checkout, cwd, workload, command), { cwd, env: checkoutEnv })
+      await exec('docker', containerBuildArgs(checkout, cwd, workload, command, profile, { rustImage, toolsDir }), { cwd, env: checkoutEnv })
     }
-    const output = await containedPath(cwd, workload.artifact.output_directory)
+    const output = await containedPath(profile.output_base === 'checkout' ? checkout : cwd, workload.artifact.output_directory)
+    if (rust) await verifyBootstrap(output, profile.architecture)
     let zip = output
     if ((await stat(output)).isDirectory()) {
       zip = join(workspace, 'artifact.zip')
