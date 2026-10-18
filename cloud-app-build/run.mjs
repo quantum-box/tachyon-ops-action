@@ -74,6 +74,18 @@ export async function containedPath(root, path) {
   return target
 }
 
+// Secret-sourced values never reach the workload (the control plane drops
+// them), so masking is only a backstop. GitHub masks every occurrence of a
+// masked string, and short values such as `1` or `true` would blank digits
+// and words across the whole log, so only mask values long enough to matter.
+export const MIN_MASKED_ENV_VALUE_LENGTH = 8
+
+export function maskedEnvValues(workload) {
+  return (workload.env ?? [])
+    .map(item => item.value)
+    .filter(value => typeof value === 'string' && value.length >= MIN_MASKED_ENV_VALUE_LENGTH)
+}
+
 export function buildEnvironment(workload, env) {
   const result = {}
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'CI']) {
@@ -203,7 +215,7 @@ export async function run(env = process.env, http = fetch, runtime = {}) {
   validateWorkload(workload, profile)
   const rust = profile.kind === 'cargo_lambda'
   const rustImage = rust ? rustBuilderImage(env.TACHYON_BUILD_RUST_IMAGE) : undefined
-  for (const item of workload.env ?? []) if (item.value) mask(item.value)
+  for (const value of maskedEnvValues(workload)) mask(value)
   const started = Date.now()
   let success = false
   let buildError
