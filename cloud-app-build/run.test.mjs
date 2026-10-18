@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { chmod, mkdtemp, mkdir, symlink, realpath, stat, writeFile } from 'node:fs/promises'
 import { availableParallelism, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, rustBuilderImage, validateLambdaZip, validateWorkload, verifyBootstrap, run } from './run.mjs'
+import { apiOrigin, buildEnvironment, containerBuildArgs, containedPath, maskedEnvValues, rustBuilderImage, validateLambdaZip, validateWorkload, verifyBootstrap, run } from './run.mjs'
 
 const workload = () => ({
   deployment_target: 'lambda', source: { repository_url: 'https://github.com/acme/app', commit_sha: 'a'.repeat(40) },
@@ -311,4 +311,16 @@ test('cargo lambda run reads the artifact from the checkout root and checks its 
   assert.match(wrong.error.message, /not built for arm64/)
   assert.equal(wrong.requests.filter(r => r.options.method === 'PUT').length, 0)
   assert.equal(JSON.parse(wrong.requests.find(r => r.url.endsWith('/complete')).options.body).success, false)
+})
+
+test('only env values long enough to be sensitive are masked', () => {
+  const workload = { env: [
+    { name: 'TACHYON_BUILD_CACHE_RESET', value: '1' },
+    { name: 'FEATURE', value: 'true' },
+    { name: 'EMPTY', value: '' },
+    { name: 'API_ORIGIN', value: 'https://api.example.com' },
+    { name: 'EXACT', value: '12345678' },
+  ] }
+  assert.deepEqual(maskedEnvValues(workload), ['https://api.example.com', '12345678'])
+  assert.deepEqual(maskedEnvValues({}), [])
 })
